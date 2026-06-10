@@ -33,9 +33,11 @@ class VibeAudioEngine {
   load(vibe: Vibe, params: VibeParams) {
     this.currentVibe = vibe;
     this.currentParams = params;
-    this.currentCode = buildStrudelCode(vibe, params);
+    this.currentCode = buildStrudelCode(vibe, params, { preferNative: false });
     if (this.started) {
-      void this.applyPattern();
+      void this.applyPattern().catch(() => {
+        this.started = false;
+      });
     }
   }
 
@@ -47,7 +49,7 @@ class VibeAudioEngine {
   async start() {
     const runtime = await this.ensureRuntime();
     if (!this.currentCode && this.currentVibe && this.currentParams) {
-      this.currentCode = buildStrudelCode(this.currentVibe, this.currentParams);
+      this.currentCode = buildStrudelCode(this.currentVibe, this.currentParams, { preferNative: false });
     }
     await this.applyPattern();
     await runtime.getAudioContext().resume?.();

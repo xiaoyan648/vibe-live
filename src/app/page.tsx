@@ -32,9 +32,7 @@ export default function Page() {
   const [params, setParams] = useState<VibeParams>(HOME_VIBE.params);
   const [playing, setPlaying] = useState(false);
   const [fft, setFft] = useState<number[]>([]);
-  const [savedVibes, setSavedVibes] = useState<Vibe[]>(() =>
-    typeof window === "undefined" ? [] : loadSavedVibes(),
-  );
+  const [savedVibes, setSavedVibes] = useState<Vibe[]>([]);
   const [lastPrompt, setLastPrompt] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
@@ -43,6 +41,12 @@ export default function Page() {
 
   const preparePlayableVibe = useCallback((vibe: Vibe, prompt = "") => {
     return enforceMusicQuality(prompt || vibe.tagline || vibe.name, vibe).vibe;
+  }, []);
+
+  useEffect(() => {
+    queueMicrotask(() => {
+      setSavedVibes(loadSavedVibes());
+    });
   }, []);
 
   const selectVibe = useCallback((vibe: Vibe, prompt = "", autoplay = true) => {
@@ -83,13 +87,13 @@ export default function Page() {
 
   async function playVibeFromHome(vibe: Vibe) {
     const playable = preparePlayableVibe(vibe);
+    selectVibe(playable, "", true);
     try {
       const engine = getVibeAudioEngine();
       engine.load(playable, playable.params);
       await engine.start();
-      selectVibe(playable, "", true);
     } catch (error) {
-      selectVibe(playable, "", false);
+      setPlaying(false);
       setNotice(error instanceof Error ? error.message : "浏览器拦截了自动播放，进入后再点一次播放。");
     }
   }
@@ -307,6 +311,7 @@ export default function Page() {
             vibe={active}
             params={params}
             playing={playing}
+            fft={fft}
             onBack={back}
             onTogglePlay={() => setPlaying((p) => !p)}
             onParamChange={changeParam}

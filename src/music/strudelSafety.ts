@@ -160,7 +160,11 @@ function hasBalancedParens(codeWithoutStrings: string) {
 }
 
 export function sanitizeStrudelCode(input: string | undefined | null) {
-  const code = (input ?? "").trim();
+  const code = (input ?? "")
+    .trim()
+    .replace(/\\+r\\+n|\\+n|\\+r/g, "\n")
+    .replace(/\\+t/g, "  ")
+    .replace(/\\+"/g, "\"");
   if (!code || code.length > MAX_STRUDEL_CODE_LENGTH) return null;
   if (/\/\*|\*\/|\/\//.test(code)) return null;
 

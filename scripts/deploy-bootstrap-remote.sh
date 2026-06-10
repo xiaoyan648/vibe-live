@@ -17,11 +17,20 @@ else
   exit 1
 fi
 
-if ! command -v node >/dev/null 2>&1 || [[ "$(node -p 'process.versions.node.split(\".\")[0]')" -lt 20 ]]; then
-  echo "==> Installing Node.js 20 via NodeSource..."
-  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+NODE_MAJOR="$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)"
+if ! command -v node >/dev/null 2>&1 || [[ "$NODE_MAJOR" -lt 20 ]]; then
+  echo "==> Installing Node.js 20..."
   if command -v apt-get >/dev/null 2>&1; then
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
     apt-get install -y -qq nodejs
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf module install -y nodejs:20 || dnf install -y nodejs
+  elif command -v yum >/dev/null 2>&1; then
+    curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
+    yum install -y nodejs
+  else
+    echo "Unsupported OS. Install Node.js 20+ manually."
+    exit 1
   fi
 fi
 

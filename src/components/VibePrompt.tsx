@@ -100,7 +100,7 @@ function persistSession(session: RecorderSession | null) {
 export default function VibePrompt({ onGenerated, accent, accent2 }: Props) {
   const [prompt, setPrompt] = useState(EXAMPLES[0]);
   const [open, setOpen] = useState(false);
-  const [session, setSession] = useState<RecorderSession | null>(() => loadStoredSession());
+  const [session, setSession] = useState<RecorderSession | null>(null);
   const generating = session?.status === "generating";
 
   const statusText = useMemo(() => {
@@ -110,6 +110,12 @@ export default function VibePrompt({ onGenerated, accent, accent2 }: Props) {
     if (session.status === "error") return "刻录中断";
     return "等待刻录";
   }, [session]);
+
+  useEffect(() => {
+    queueMicrotask(() => {
+      setSession(loadStoredSession());
+    });
+  }, []);
 
   useEffect(() => {
     if (!open) return;

@@ -98,15 +98,21 @@ function synthFor(vibe: Vibe, role: "bass" | "pad" | "melody" | "arp") {
   return tone === "spring" || tone === "forest" ? "triangle" : "sine";
 }
 
-export function buildStrudelCode(vibe: Vibe, params: VibeParams = vibe.params) {
+interface BuildStrudelCodeOptions {
+  preferNative?: boolean;
+}
+
+export function buildStrudelCode(vibe: Vibe, params: VibeParams = vibe.params, options: BuildStrudelCodeOptions = {}) {
   const pattern = vibe.pattern;
   if (!pattern) {
     return `stack(note("c3 e3 g3").s("triangle").gain(.4)).cpm(${num(params.tempo / 4)}).analyze(1)`;
   }
 
-  const nativeCode = prepareStrudelCode(pattern.strudel?.code, params);
-  if (nativeCode) {
-    return nativeCode;
+  if (options.preferNative !== false) {
+    const nativeCode = prepareStrudelCode(pattern.strudel?.code, params);
+    if (nativeCode) {
+      return nativeCode;
+    }
   }
 
   const mini = pattern.mini ?? defaultMini(pattern);

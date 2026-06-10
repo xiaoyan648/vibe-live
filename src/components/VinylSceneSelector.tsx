@@ -105,6 +105,7 @@ export default function VinylSceneSelector({ vibes, onPreview, onSelect, onGener
   const pointerRef = useRef({ x: 0, y: 0 });
   const dragVelocityRef = useRef(0);
   const settleTweenRef = useRef<gsap.core.Tween | null>(null);
+  const previousVibeCountRef = useRef(vibes.length);
   const active = vibes[index];
 
   const toneStyle = useMemo(
@@ -128,6 +129,18 @@ export default function VinylSceneSelector({ vibes, onPreview, onSelect, onGener
     indexRef.current = index;
     onPreview(active);
   }, [active, index, onPreview]);
+
+  useEffect(() => {
+    const previousCount = previousVibeCountRef.current;
+    previousVibeCountRef.current = vibes.length;
+
+    if (vibes.length !== previousCount && indexRef.current === previousCount - 1) {
+      const nextIndex = vibes.length - 1;
+      indexRef.current = nextIndex;
+      playheadRef.current = nextIndex;
+      setIndex(nextIndex);
+    }
+  }, [vibes.length]);
 
   const syncNearestIndex = useCallback((offset = playheadRef.current) => {
     const nextIndex = normalizeIndex(Math.round(offset), vibes.length);
