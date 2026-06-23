@@ -1,4 +1,10 @@
-import { createOpenAIClient, getAiConfig } from "./client";
+import { createOpenAIClient, getAiConfig, type AiRequestConfig } from "./client";
+import {
+  buildPromptWithConversation,
+  getMaxConversationMessages,
+  normalizeConversationHistory,
+  type ConversationTurn,
+} from "./conversation";
 import {
   buildComposerUserPrompt,
   buildCriticUserPrompt,
@@ -26,13 +32,16 @@ import {
 import { parseModelJson, runAgentStep, type AgentModelRequest, type AgentStage } from "./agent/runner";
 import type { RegenerateTarget } from "@/data/regeneration";
 import type { Vibe } from "@/data/vibes";
-import { enforceMusicQuality, evaluateMusicQuality } from "@/music/quality";
+import { enforceMusicQuality, evaluateMusicQuality, type MusicQualityIssue } from "@/music/quality";
 import type { ResponseFormatJSONSchema } from "openai/resources/shared";
 
 export type GenerationStage = AgentStage;
 
 interface GenerationOptions {
   onStage?: (stage: GenerationStage) => void;
+  conversationHistory?: ConversationTurn[];
+  maxConversationMessages?: number;
+  aiConfig?: AiRequestConfig;
 }
 
 const COMPOSER_CANDIDATE_COUNT = 3;
@@ -47,24 +56,32 @@ function pushStage(stages: GenerationStage[], stage: GenerationStage, options?: 
   options?.onStage?.(stage);
 }
 
+function buildAgentPrompt(prompt: string, options?: GenerationOptions) {
+  const maxMessages = Math.min(getMaxConversationMessages(), getMaxConversationMessages(options?.maxConversationMessages));
+  const history = normalizeConversationHistory(options?.conversationHistory, maxMessages);
+  return buildPromptWithConversation(prompt, history);
+}
+
 async function requestStructuredJson({
   system,
   user,
   jsonSchema,
   temperature,
   maxTokens,
+  aiConfig,
 }: {
   system: string;
   user: string;
   jsonSchema: ResponseFormatJSONSchema.JSONSchema;
   temperature: number;
   maxTokens: number;
+  aiConfig?: AiRequestConfig;
 }) {
-  const client = createOpenAIClient();
-  const { model } = getAiConfig();
+  const client = createOpenAIClient(aiConfig);
+  const { model } = getAiConfig(aiConfig);
 
   if (!model) {
-    throw new Error("Missing ARK_MODEL");
+    throw new Error("Missing OPENAI_MODEL or ARK_MODEL");
   }
 
   const completion = await client.chat.completions.create({
@@ -191,18 +208,67 @@ function applyQualityGate(prompt: string, vibe: Vibe, stages: GenerationStage[],
   return quality.vibe;
 }
 
-async function runComposerCandidates({
+type ComposerCandidate = {
+  index: number;
+  direction: string;
+  output: unknown;
+  score: number;
+  failCount: number;
+  warnCount: number;
+  issues: MusicQualityIssue[];
+};
+
+function summarizeComposerIssues(issues: MusicQualityIssue[]) {
+  return issues
+    .slice(0, 5)
+    .map((issue) => `${issue.severity}:${issue.code} ${issue.message}`)
+    .join("；");
+}
+
+function scoreComposerCandidate({
+  index,
+  direction,
+  output,
+  moodPlan,
+  prompt,
+}: {
+  index: number;
+  direction: string;
+  output: unknown;
+  moodPlan: unknown;
+  prompt: string;
+}): ComposerCandidate {
+  const draft = composeDraftBlueprint(moodPlan, output, provisionalSoundDesignPlan(moodPlan));
+  const vibe = normalizeMusicBlueprint(draft);
+  const report = evaluateMusicQuality(prompt, vibe);
+
+  return {
+    index,
+    direction,
+    output,
+    score: report.score,
+    failCount: report.issues.filter((issue) => issue.severity === "fail").length,
+    warnCount: report.issues.filter((issue) => issue.severity === "warn").length,
+    issues: report.issues,
+  };
+}
+
+async function runMusicReActComposer({
   prompt,
   moodPlan,
   request,
   stages,
   options,
+  currentVibe,
+  target,
 }: {
   prompt: string;
   moodPlan: unknown;
   request: (request: AgentModelRequest) => Promise<string>;
   stages: GenerationStage[];
   options?: GenerationOptions;
+  currentVibe?: Vibe;
+  target?: RegenerateTarget;
 }) {
   const composerStep = {
     id: "composer",
@@ -211,36 +277,53 @@ async function runComposerCandidates({
     jsonSchema: compositionPlanJsonSchema,
     temperature: 0.82,
     maxTokens: 1900,
-    buildUserPrompt: (input: { prompt: string; moodPlan: unknown; direction: string }) =>
-      buildComposerUserPrompt(`${input.prompt}\n\n${input.direction}`, input.moodPlan),
+    buildUserPrompt: (input: {
+      prompt: string;
+      moodPlan: unknown;
+      direction: string;
+      currentVibe?: Vibe;
+      target?: RegenerateTarget;
+    }) => {
+      const directedPrompt = `${input.prompt}\n\n${input.direction}`;
+      return input.currentVibe && input.target
+        ? buildRegenerateComposerUserPrompt(directedPrompt, input.moodPlan, input.currentVibe, input.target)
+        : buildComposerUserPrompt(directedPrompt, input.moodPlan);
+    },
     parse: (rawJson: unknown) => rawJson,
   };
 
+  const directions = COMPOSER_CANDIDATE_DIRECTIONS.slice(0, COMPOSER_CANDIDATE_COUNT);
+  pushStage(
+    stages,
+    {
+      id: "react-plan",
+      label: target ? `ReAct 编曲 · 规划 ${target}` : "ReAct 编曲 · 规划候选",
+      status: "completed",
+    },
+    options,
+  );
+
   const settled = await Promise.allSettled(
-    COMPOSER_CANDIDATE_DIRECTIONS.slice(0, COMPOSER_CANDIDATE_COUNT).map((direction, index) =>
+    directions.map((direction, index) =>
       runAgentStep(
         { ...composerStep, temperature: 0.72 + index * 0.08 },
-        { prompt, moodPlan, direction },
+        { prompt, moodPlan, direction, currentVibe, target },
         request,
       ),
     ),
   );
 
-  const provisionalSound = provisionalSoundDesignPlan(moodPlan);
   const candidates = settled
     .map((result, index) => {
       if (result.status !== "fulfilled") return null;
       try {
-        const draft = composeDraftBlueprint(moodPlan, result.value.output, provisionalSound);
-        const vibe = normalizeMusicBlueprint(draft);
-        const report = evaluateMusicQuality(prompt, vibe);
-        return {
+        return scoreComposerCandidate({
           index,
+          direction: directions[index] ?? "",
           output: result.value.output,
-          score: report.score,
-          failCount: report.issues.filter((issue) => issue.severity === "fail").length,
-          warnCount: report.issues.filter((issue) => issue.severity === "warn").length,
-        };
+          moodPlan,
+          prompt,
+        });
       } catch {
         return null;
       }
@@ -249,16 +332,66 @@ async function runComposerCandidates({
     .sort((a, b) => b.score - a.score || a.failCount - b.failCount || a.warnCount - b.warnCount);
 
   if (!candidates.length) {
-    throw new Error("Composer candidates all failed");
+    throw new Error("ReAct composer candidates all failed");
   }
 
-  const selected = candidates[0];
+  let selected = candidates[0];
   pushStage(
     stages,
     {
-      id: "composer",
-      label: `候选作曲 · 选中 ${selected.index + 1}/${COMPOSER_CANDIDATE_COUNT} · ${selected.score}`,
+      id: "react-observe",
+      label: `ReAct 编曲 · 观察候选 · 最佳 ${selected.score}`,
       status: candidates.length < COMPOSER_CANDIDATE_COUNT ? "repaired" : "completed",
+    },
+    options,
+  );
+
+  if (selected.failCount > 0 || selected.score < 78) {
+    const repairDirection = [
+      "ReAct 修复：保留候选里最匹配场景的方向，但必须修复观察到的音乐质量问题。",
+      "优先补足可记忆旋律、低音运动、groove 层次、场景明暗匹配和安全原生 Strudel。",
+      `Observation：${summarizeComposerIssues(selected.issues) || "score below threshold"}`,
+    ].join("\n");
+
+    try {
+      const repairStep = await runAgentStep(
+        { ...composerStep, temperature: 0.66 },
+        { prompt, moodPlan, direction: repairDirection, currentVibe, target },
+        request,
+      );
+      const repaired = scoreComposerCandidate({
+        index: candidates.length,
+        direction: repairDirection,
+        output: repairStep.output,
+        moodPlan,
+        prompt,
+      });
+      const acceptedRepair = repaired.score > selected.score || repaired.failCount < selected.failCount;
+
+      if (acceptedRepair) {
+        selected = repaired;
+      }
+
+      pushStage(
+        stages,
+        {
+          id: "react-repair",
+          label: `ReAct 编曲 · 修复候选 · ${repaired.score}`,
+          status: acceptedRepair ? "repaired" : "completed",
+        },
+        options,
+      );
+    } catch {
+      pushStage(stages, { id: "react-repair", label: "ReAct 编曲 · 修复候选", status: "fallback" }, options);
+    }
+  }
+
+  pushStage(
+    stages,
+    {
+      id: "react-finish",
+      label: `ReAct 编曲 · 选中 ${selected.index + 1}/${Math.max(COMPOSER_CANDIDATE_COUNT, selected.index + 1)} · ${selected.score}`,
+      status: selected.failCount > 0 ? "repaired" : "completed",
     },
     options,
   );
@@ -339,9 +472,10 @@ export async function generateVibeFromPrompt(
   options?: GenerationOptions,
 ): Promise<{ vibe: Vibe; repaired: boolean; fallback: boolean; stages: GenerationStage[] }> {
   const stages: GenerationStage[] = [];
+  const agentPrompt = buildAgentPrompt(prompt, options);
 
   try {
-    const request = (body: AgentModelRequest) => requestStructuredJson(body);
+    const request = (body: AgentModelRequest) => requestStructuredJson({ ...body, aiConfig: options?.aiConfig });
 
     const moodStep = await runAgentStep(
       {
@@ -354,13 +488,13 @@ export async function generateVibeFromPrompt(
         buildUserPrompt: buildMoodDirectorUserPrompt,
         parse: (rawJson) => rawJson,
       },
-      prompt,
+      agentPrompt,
       request,
     );
     pushStage(stages, moodStep.stage, options);
 
-    const compositionPlan = await runComposerCandidates({
-      prompt,
+    const compositionPlan = await runMusicReActComposer({
+      prompt: agentPrompt,
       moodPlan: moodStep.output,
       request,
       stages,
@@ -379,7 +513,7 @@ export async function generateVibeFromPrompt(
           buildSoundDesignerUserPrompt(input.prompt, input.moodPlan, input.compositionPlan),
         parse: (rawJson) => rawJson,
       },
-      { prompt, moodPlan: moodStep.output, compositionPlan },
+      { prompt: agentPrompt, moodPlan: moodStep.output, compositionPlan },
       request,
     );
     pushStage(stages, soundStep.stage, options);
@@ -413,7 +547,7 @@ export async function generateVibeFromPrompt(
           parse: (rawJson) => rawJson,
         },
         {
-          prompt,
+          prompt: agentPrompt,
           moodPlan: moodStep.output,
           compositionPlan,
           soundDesignPlan: soundStep.output,
@@ -428,20 +562,20 @@ export async function generateVibeFromPrompt(
       pushStage(stages, { id: "critic", label: "Critic / Repair", status: "fallback" }, options);
     }
 
-    musicBlueprint = applyQualityGate(prompt, musicBlueprint, stages, options);
+    musicBlueprint = applyQualityGate(agentPrompt, musicBlueprint, stages, options);
 
     let visualCode = "";
     let rawVisualOutput = "";
 
     try {
-      rawVisualOutput = await requestVisualCode(prompt, musicBlueprint);
+      rawVisualOutput = await requestVisualCode(agentPrompt, musicBlueprint);
       visualCode = normalizeVisualOutput(parseModelJson(rawVisualOutput));
       pushStage(stages, { id: "visual", label: "动态视觉", status: "completed" }, options);
     } catch (visualError) {
       const message = visualError instanceof Error ? visualError.message : String(visualError);
       if (rawVisualOutput) {
         try {
-          const repairedVisualOutput = await requestVisualCode(prompt, musicBlueprint, {
+          const repairedVisualOutput = await requestVisualCode(agentPrompt, musicBlueprint, {
             rawOutput: rawVisualOutput,
             error: message,
           });
@@ -465,7 +599,7 @@ export async function generateVibeFromPrompt(
     };
   } catch (error) {
     pushStage(stages, { id: "agent", label: "轻量 Agent", status: "fallback" }, options);
-    const fallbackVibe = applyQualityGate(prompt, fallbackGeneratedVibe(prompt), stages, options);
+    const fallbackVibe = applyQualityGate(agentPrompt, fallbackGeneratedVibe(prompt), stages, options);
     return {
       vibe: fallbackVibe,
       repaired: stages.some((stage) => stage.status === "repaired"),
@@ -479,11 +613,13 @@ export async function regenerateVibeFromPrompt(
   prompt: string,
   baseVibeInput: unknown,
   target: RegenerateTarget = "music",
+  options?: GenerationOptions,
 ): Promise<{ vibe: Vibe; repaired: boolean; fallback: boolean; stages: GenerationStage[] }> {
   const baseVibe = normalizeGeneratedVibe(baseVibeInput);
+  const agentPrompt = buildAgentPrompt(prompt, options);
 
   if (target === "full") {
-    return generateVibeFromPrompt(prompt);
+    return generateVibeFromPrompt(prompt, options);
   }
 
   const stages: GenerationStage[] = [];
@@ -493,24 +629,24 @@ export async function regenerateVibeFromPrompt(
     let rawVisualOutput = "";
 
     try {
-      rawVisualOutput = await requestVisualCode(prompt, baseVibe);
+      rawVisualOutput = await requestVisualCode(agentPrompt, baseVibe);
       visualCode = normalizeVisualOutput(parseModelJson(rawVisualOutput));
-      stages.push({ id: "visual", label: "动态视觉", status: "completed" });
+      pushStage(stages, { id: "visual", label: "动态视觉", status: "completed" }, options);
     } catch (visualError) {
       const message = visualError instanceof Error ? visualError.message : String(visualError);
       if (rawVisualOutput) {
         try {
-          const repairedVisualOutput = await requestVisualCode(prompt, baseVibe, {
+          const repairedVisualOutput = await requestVisualCode(agentPrompt, baseVibe, {
             rawOutput: rawVisualOutput,
             error: message,
           });
           visualCode = normalizeVisualOutput(parseModelJson(repairedVisualOutput));
-          stages.push({ id: "visual", label: "动态视觉", status: "repaired" });
+          pushStage(stages, { id: "visual", label: "动态视觉", status: "repaired" }, options);
         } catch {
-          stages.push({ id: "visual", label: "动态视觉", status: "fallback" });
+          pushStage(stages, { id: "visual", label: "动态视觉", status: "fallback" }, options);
         }
       } else {
-        stages.push({ id: "visual", label: "动态视觉", status: "fallback" });
+        pushStage(stages, { id: "visual", label: "动态视觉", status: "fallback" }, options);
       }
     }
 
@@ -523,26 +659,19 @@ export async function regenerateVibeFromPrompt(
   }
 
   try {
-    const request = (body: AgentModelRequest) => requestStructuredJson(body);
+    const request = (body: AgentModelRequest) => requestStructuredJson({ ...body, aiConfig: options?.aiConfig });
     const moodPlan = moodPlanFromVibe(baseVibe);
-    stages.push({ id: "mood", label: "Mood Director", status: "completed" });
+    pushStage(stages, { id: "mood", label: "Mood Director", status: "completed" }, options);
 
-    const compositionStep = await runAgentStep(
-      {
-        id: "composer",
-        label: "Composer",
-        system: COMPOSER_SYSTEM_PROMPT,
-        jsonSchema: compositionPlanJsonSchema,
-        temperature: 0.74,
-        maxTokens: 1700,
-        buildUserPrompt: (input: { prompt: string; moodPlan: unknown; currentVibe: unknown; target: RegenerateTarget }) =>
-          buildRegenerateComposerUserPrompt(input.prompt, input.moodPlan, input.currentVibe, input.target),
-        parse: (rawJson) => rawJson,
-      },
-      { prompt, moodPlan, currentVibe: baseVibe, target },
+    const compositionPlan = await runMusicReActComposer({
+      prompt: agentPrompt,
+      moodPlan,
       request,
-    );
-    stages.push(compositionStep.stage);
+      stages,
+      options,
+      currentVibe: baseVibe,
+      target,
+    });
 
     const soundStep = await runAgentStep(
       {
@@ -556,13 +685,13 @@ export async function regenerateVibeFromPrompt(
           buildSoundDesignerUserPrompt(input.prompt, input.moodPlan, input.compositionPlan),
         parse: (rawJson) => rawJson,
       },
-      { prompt, moodPlan, compositionPlan: compositionStep.output },
+      { prompt: agentPrompt, moodPlan, compositionPlan },
       request,
     );
-    stages.push(soundStep.stage);
+    pushStage(stages, soundStep.stage, options);
 
     const draftBlueprint = {
-      ...composeDraftBlueprint(moodPlan, compositionStep.output, soundStep.output),
+      ...composeDraftBlueprint(moodPlan, compositionPlan, soundStep.output),
       id: baseVibe.id,
       name: baseVibe.name,
       subtitle: baseVibe.subtitle,
@@ -600,25 +729,25 @@ export async function regenerateVibeFromPrompt(
           parse: (rawJson) => rawJson,
         },
         {
-          prompt,
+          prompt: agentPrompt,
           moodPlan,
-          compositionPlan: compositionStep.output,
+          compositionPlan,
           soundDesignPlan: soundStep.output,
           draftBlueprint,
         },
         request,
       );
       musicBlueprint = extractCriticBlueprint(criticStep.output, draftBlueprint);
-      stages.push(criticStep.stage);
+      pushStage(stages, criticStep.stage, options);
     } catch {
       musicBlueprint = normalizeMusicBlueprint(draftBlueprint);
-      stages.push({ id: "critic", label: "Critic / Repair", status: "fallback" });
+      pushStage(stages, { id: "critic", label: "Critic / Repair", status: "fallback" }, options);
     }
 
-    stages.push({ id: "compose", label: "合成 Vibe", status: "completed" });
+    pushStage(stages, { id: "compose", label: "合成 Vibe", status: "completed" }, options);
 
     const mergedVibe = mergeRegeneratedTarget(baseVibe, musicBlueprint, target);
-    const qualityVibe = applyQualityGate(prompt, mergedVibe, stages);
+    const qualityVibe = applyQualityGate(agentPrompt, mergedVibe, stages, options);
 
     return {
       vibe: qualityVibe,
@@ -627,7 +756,7 @@ export async function regenerateVibeFromPrompt(
       stages,
     };
   } catch {
-    stages.push({ id: "agent", label: "局部再生成", status: "fallback" });
+    pushStage(stages, { id: "agent", label: "局部再生成", status: "fallback" }, options);
     return {
       vibe: baseVibe,
       repaired: false,

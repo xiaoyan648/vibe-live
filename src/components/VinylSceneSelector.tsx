@@ -11,7 +11,7 @@ interface Props {
   vibes: Vibe[];
   onPreview: (vibe: Vibe) => void;
   onSelect: (vibe: Vibe) => void;
-  onGenerated: (vibe: Vibe, prompt: string) => void;
+  onGenerated: (vibe: Vibe, prompt: string, phase?: "music" | "artwork") => void;
 }
 
 type SceneItem = {
@@ -100,6 +100,7 @@ export default function VinylSceneSelector({ vibes, onPreview, onSelect, onGener
   const [index, setIndex] = useState(vibes.length - 1);
   const rootRef = useRef<HTMLElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const canvasBoundsRef = useRef({ left: 0, top: 0, width: 1, height: 1 });
   const indexRef = useRef(index);
   const playheadRef = useRef(index);
   const pointerRef = useRef({ x: 0, y: 0 });
@@ -115,6 +116,25 @@ export default function VinylSceneSelector({ vibes, onPreview, onSelect, onGener
     }),
     [active],
   );
+
+  const refreshCanvasBounds = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return canvasBoundsRef.current;
+    const rect = canvas.getBoundingClientRect();
+    canvasBoundsRef.current = {
+      left: rect.left,
+      top: rect.top,
+      width: Math.max(1, rect.width),
+      height: Math.max(1, rect.height),
+    };
+    return canvasBoundsRef.current;
+  }, []);
+
+  const updatePointerTilt = useCallback((clientX: number, clientY: number) => {
+    const rect = canvasBoundsRef.current;
+    pointerRef.current.x = ((clientX - rect.left) / rect.width - 0.5) * 2;
+    pointerRef.current.y = ((clientY - rect.top) / rect.height - 0.5) * 2;
+  }, []);
   const rhythmSteps = useMemo(
     () =>
       patternToSteps(
@@ -155,8 +175,8 @@ export default function VinylSceneSelector({ vibes, onPreview, onSelect, onGener
     const distance = Math.abs(offset - playheadRef.current);
     settleTweenRef.current = gsap.to(playheadRef, {
       current: offset,
-      duration: Math.min(0.72, 0.34 + distance * 0.12 + Math.min(Math.abs(velocity) / 1800, 0.2)),
-      ease: "power3.out",
+      duration: Math.min(0.46, 0.2 + distance * 0.08 + Math.min(Math.abs(velocity) / 2400, 0.14)),
+      ease: "power4.out",
       onUpdate: () => syncNearestIndex(),
       onComplete: () => syncNearestIndex(offset),
     });
@@ -327,6 +347,7 @@ export default function VinylSceneSelector({ vibes, onPreview, onSelect, onGener
     }
 
     resize();
+    refreshCanvasBounds();
     window.addEventListener("resize", resize);
     raf = requestAnimationFrame(animate);
 
@@ -349,7 +370,7 @@ export default function VinylSceneSelector({ vibes, onPreview, onSelect, onGener
       grooveGeometry.dispose();
       renderer.dispose();
     };
-  }, [vibes]);
+  }, [refreshCanvasBounds, vibes]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -371,8 +392,8 @@ export default function VinylSceneSelector({ vibes, onPreview, onSelect, onGener
           .timeline({ defaults: { ease: "power3.out" } })
           .fromTo(
             root.querySelectorAll(".vinyl-selector__head, .vinyl-scene-shell, .vinyl-meta, .blank-record-slot, .vinyl-queue"),
-            { y: 18, autoAlpha: 0 },
-            { y: 0, autoAlpha: 1, duration: 0.72, stagger: 0.07 },
+            { y: 12, autoAlpha: 0 },
+            { y: 0, autoAlpha: 1, duration: 0.46, stagger: 0.04 },
           );
 
     const draggables = Draggable.create(proxy, {
@@ -380,6 +401,7 @@ export default function VinylSceneSelector({ vibes, onPreview, onSelect, onGener
       trigger: canvasEl,
       minimumMovement: 3,
       onPress() {
+        refreshCanvasBounds();
         settleTweenRef.current?.kill();
         startOffset = playheadRef.current;
         lastX = this.x;
@@ -389,8 +411,7 @@ export default function VinylSceneSelector({ vibes, onPreview, onSelect, onGener
         root.classList.add("is-dragging");
       },
       onDrag() {
-        const rect = canvasEl.getBoundingClientRect();
-        const step = Math.max(150, rect.width * 0.22);
+        const step = Math.max(150, canvasBoundsRef.current.width * 0.22);
         const now = performance.now();
         const elapsed = Math.max(8, now - lastTime);
         releaseVelocity = ((this.x - lastX) / elapsed) * 1000;
@@ -418,7 +439,7 @@ export default function VinylSceneSelector({ vibes, onPreview, onSelect, onGener
       draggables.forEach((draggable) => draggable.kill());
       settleTweenRef.current?.kill();
     };
-  }, [animateToOffset, syncNearestIndex, vibes.length]);
+  }, [animateToOffset, refreshCanvasBounds, syncNearestIndex, vibes.length]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -428,7 +449,7 @@ export default function VinylSceneSelector({ vibes, onPreview, onSelect, onGener
     gsap.fromTo(
       targets,
       { y: 8, autoAlpha: 0.72 },
-      { y: 0, autoAlpha: 1, duration: 0.42, stagger: 0.012, ease: "power2.out", overwrite: true },
+      { y: 0, autoAlpha: 1, duration: 0.26, stagger: 0.008, ease: "power2.out", overwrite: true },
     );
   }, [active.id]);
 
@@ -436,9 +457,9 @@ export default function VinylSceneSelector({ vibes, onPreview, onSelect, onGener
     <section ref={rootRef} className="vinyl-selector" style={toneStyle} aria-label="选择氛围唱片">
       <div className="vinyl-selector__head">
         <div>
-          <span className="vinyl-selector__kicker mono">LIVE CRATE</span>
-          <h2>选择唱片</h2>
-            <p>拖动封套，或刻一张新的。</p>
+          <span className="vinyl-selector__kicker mono">CRATE</span>
+          <h2>唱片架</h2>
+          <p>{active.name}</p>
         </div>
         <div className="vinyl-orbit-readout mono" aria-hidden="true">
           <span>{formatPatternReadout(active.pattern)}</span>
@@ -462,10 +483,16 @@ export default function VinylSceneSelector({ vibes, onPreview, onSelect, onGener
           ref={canvasRef}
           className="vinyl-scene"
           aria-hidden="true"
+          onPointerEnter={(event) => {
+            refreshCanvasBounds();
+            updatePointerTilt(event.clientX, event.clientY);
+          }}
+          onPointerDown={(event) => {
+            refreshCanvasBounds();
+            updatePointerTilt(event.clientX, event.clientY);
+          }}
           onPointerMove={(event) => {
-            const rect = event.currentTarget.getBoundingClientRect();
-            pointerRef.current.x = ((event.clientX - rect.left) / rect.width - 0.5) * 2;
-            pointerRef.current.y = ((event.clientY - rect.top) / rect.height - 0.5) * 2;
+            updatePointerTilt(event.clientX, event.clientY);
           }}
           onPointerLeave={() => {
             pointerRef.current = { x: 0, y: 0 };

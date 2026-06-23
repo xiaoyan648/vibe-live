@@ -1,380 +1,269 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { hasUsableUserAiConfig, type UserAiConfig } from "@/ai/userConfig";
+import type { RegenerateTarget } from "@/data/regeneration";
 import type { Vibe } from "@/data/vibes";
 
 interface Props {
-  onGenerated: (vibe: Vibe, prompt: string) => void;
+  onGenerated: (vibe: Vibe, prompt: string, phase?: "music" | "artwork") => void;
+  onOpenVibe?: (vibe: Vibe) => void;
+  baseVibe?: Vibe | null;
   accent?: string;
   accent2?: string;
+  aiConfig?: Partial<UserAiConfig>;
 }
 
-type RecorderStatus = "idle" | "generating" | "completed" | "error";
-type LogStatus = "pending" | "completed" | "repaired" | "fallback" | "error";
-
-interface RecorderLog {
+type ChatMessage = {
   id: string;
-  label: string;
-  status: LogStatus;
-  at: string;
-  message?: string;
-}
-
-interface RecorderSession {
-  id: string;
-  prompt: string;
-  status: RecorderStatus;
-  logs: RecorderLog[];
-  startedAt: string;
-  updatedAt: string;
-  error?: string;
+  role: "user" | "assistant";
+  text: string;
+  status?: "thinking" | "done" | "error";
   vibe?: Vibe;
-}
+};
 
-interface StreamEvent {
-  type?: string;
-  at?: string;
-  message?: string;
-  error?: string;
-  stage?: {
-    id: string;
-    label: string;
-    status: "completed" | "repaired" | "fallback";
-  };
+interface GenerateResponse {
   vibe?: Vibe;
+  error?: string;
+  detail?: string;
+  fallback?: boolean;
 }
 
-const STORAGE_KEY = "vibelive:recorder-session:v1";
-const EXAMPLES = ["雨夜便利店门口的低保真爵士", "漂浮在木星云层里的冥想电子", "凌晨三点写代码的霓虹鼓点"];
+type ConversationPayloadTurn = {
+  role: "user" | "assistant";
+  text: string;
+};
 
-function createSessionId() {
+const STORAGE_KEY = "vibelive:conversation:v2";
+const EXAMPLES = ["更像森林里的旧收音机", "把节奏放慢，留出更多空气", "换成极简深绿色网页，只保留轻微漂浮动画"];
+const DEFAULT_MAX_CONVERSATION_MESSAGES = 8;
+const MAX_CONVERSATION_MESSAGES_CAP = 20;
+const MAX_CONVERSATION_MESSAGES = getClientMaxConversationMessages();
+const MESSAGE_STORAGE_LIMIT = Math.max(6, MAX_CONVERSATION_MESSAGES + 2);
+
+function createId(prefix = "msg") {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
-    : `rec-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    : `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function nowIso() {
-  return new Date().toISOString();
-}
-
-function loadStoredSession() {
-  if (typeof window === "undefined") return null;
+function loadStoredMessages(): ChatMessage[] {
+  if (typeof window === "undefined") return [];
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as RecorderSession;
-    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.logs)) return null;
-    if (parsed.status === "generating") {
-      return {
-        ...parsed,
-        status: "error" as RecorderStatus,
-        error: "页面刷新后无法继续接收上一次刻录日志，请重新刻录。",
-        updatedAt: nowIso(),
-      };
-    }
-    return parsed;
+    const parsed = JSON.parse(window.localStorage.getItem(STORAGE_KEY) || "[]") as ChatMessage[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.slice(-MESSAGE_STORAGE_LIMIT);
   } catch {
-    return null;
+    return [];
   }
 }
 
-function formatTime(value: string) {
-  try {
-    return new Intl.DateTimeFormat("zh-CN", {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    }).format(new Date(value));
-  } catch {
-    return "--:--:--";
-  }
+function getClientMaxConversationMessages() {
+  const raw = process.env.NEXT_PUBLIC_VIBELIVE_MAX_CONVERSATION_MESSAGES;
+  const parsed = raw ? Number.parseInt(raw, 10) : DEFAULT_MAX_CONVERSATION_MESSAGES;
+  if (!Number.isFinite(parsed)) return DEFAULT_MAX_CONVERSATION_MESSAGES;
+  return Math.max(0, Math.min(MAX_CONVERSATION_MESSAGES_CAP, parsed));
 }
 
-function persistSession(session: RecorderSession | null) {
-  if (typeof window === "undefined" || !session) return;
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+function inferTarget(prompt: string): RegenerateTarget {
+  if (/网页|页面|视觉|背景|颜色|动画|封面|画面|极简|高级感|氛围感/.test(prompt)) return "visual";
+  if (/鼓|鼓点|节拍|kick|snare|hat/i.test(prompt)) return "drums";
+  if (/低音|bass/i.test(prompt)) return "bass";
+  if (/旋律|melody|主线/i.test(prompt)) return "melody";
+  if (/琶音|arp/i.test(prompt)) return "arp";
+  if (/整体|整张|全部|重做|重新/i.test(prompt)) return "full";
+  return "music";
 }
 
-export default function VibePrompt({ onGenerated, accent, accent2 }: Props) {
-  const [prompt, setPrompt] = useState(EXAMPLES[0]);
-  const [open, setOpen] = useState(false);
-  const [session, setSession] = useState<RecorderSession | null>(null);
-  const generating = session?.status === "generating";
+function toConversationHistory(messages: ChatMessage[], maxMessages: number): ConversationPayloadTurn[] {
+  if (maxMessages <= 0) return [];
 
-  const statusText = useMemo(() => {
-    if (!session) return "等待刻录";
-    if (session.status === "generating") return "刻录中";
-    if (session.status === "completed") return "刻录完成";
-    if (session.status === "error") return "刻录中断";
-    return "等待刻录";
-  }, [session]);
+  return messages
+    .filter((message) => message.status !== "thinking" && (message.role === "user" || message.role === "assistant") && message.text.trim())
+    .slice(-maxMessages)
+    .map((message) => ({
+      role: message.role,
+      text: message.text.trim().replace(/\s+/g, " ").slice(0, 600),
+    }));
+}
+
+export default function VibePrompt({ onGenerated, onOpenVibe, baseVibe, accent, accent2, aiConfig }: Props) {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [inputValue, setInputValue] = useState(EXAMPLES[0]);
+  const [generating, setGenerating] = useState(false);
+  const [latestVibe, setLatestVibe] = useState<Vibe | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const contextLabel = baseVibe ? `正在修改「${baseVibe.name}」` : "新建唱片";
+  const targetLabel = useMemo(() => {
+    if (!baseVibe) return "新唱片";
+    return inferTarget(inputValue) === "visual" ? "视觉调音" : "音乐调音";
+  }, [baseVibe, inputValue]);
 
   useEffect(() => {
-    queueMicrotask(() => {
-      setSession(loadStoredSession());
-    });
+    queueMicrotask(() => setMessages(loadStoredMessages()));
   }, []);
 
   useEffect(() => {
-    if (!open) return;
-
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") setOpen(false);
-    }
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open]);
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(messages.slice(-MESSAGE_STORAGE_LIMIT)));
+  }, [messages]);
 
   useEffect(() => {
-    if (typeof window === "undefined" || !session) return;
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
-  }, [session]);
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "56px";
+    textarea.style.height = `${Math.min(160, Math.max(56, textarea.scrollHeight))}px`;
+  }, [inputValue]);
 
-  function updateSession(updater: (current: RecorderSession) => RecorderSession) {
-    setSession((current) => {
-      const next = current ? updater(current) : current;
-      persistSession(next);
-      return next;
-    });
-  }
+  async function submit() {
+    const value = inputValue.trim();
+    if (value.length < 3 || generating) return;
 
-  function replaceSession(next: RecorderSession) {
-    persistSession(next);
-    setSession(next);
-  }
-
-  function appendLog(log: Omit<RecorderLog, "at"> & { at?: string }) {
-    updateSession((current) => ({
-      ...current,
-      logs: [...current.logs, { ...log, at: log.at ?? nowIso() }],
-      updatedAt: nowIso(),
-    }));
-  }
-
-  function handleStreamEvent(event: StreamEvent) {
-    const at = event.at ?? nowIso();
-
-    if (event.type === "log") {
-      appendLog({
-        id: `log-${at}`,
-        label: event.message ?? "刻录日志",
-        status: "completed",
-        at,
-      });
-      return;
-    }
-
-    if (event.type === "stage" && event.stage) {
-      appendLog({
-        id: event.stage.id,
-        label: event.stage.label,
-        status: event.stage.status,
-        at,
-      });
-      return;
-    }
-
-    if (event.type === "error") {
-      updateSession((current) => ({
-        ...current,
-        status: "error",
-        error: event.error ?? "生成失败，请稍后再试。",
-        logs: [
-          ...current.logs,
-          {
-            id: "error",
-            label: "刻录失败",
-            status: "error",
-            at,
-            message: event.error,
-          },
-        ],
-        updatedAt: nowIso(),
-      }));
-    }
-  }
-
-  async function generate() {
-    const value = prompt.trim();
-    if (value.length < 3) {
-      const at = nowIso();
-      replaceSession({
-        id: createSessionId(),
-        prompt: value,
-        status: "error",
-        logs: [{ id: "validation", label: "请先描述一个更具体的氛围", status: "error", at }],
-        startedAt: at,
-        updatedAt: at,
-        error: "请先描述一个更具体的氛围。",
-      });
-      return;
-    }
-
-    const startedAt = nowIso();
-    replaceSession({
-      id: createSessionId(),
-      prompt: value,
-      status: "generating",
-      logs: [{ id: "start", label: "准备空白唱片", status: "pending", at: startedAt }],
-      startedAt,
-      updatedAt: startedAt,
-    });
+    const userMessage: ChatMessage = { id: createId("user"), role: "user", text: value };
+    const pendingId = createId("assistant");
+    const nextHistory = [...messages, userMessage];
+    setMessages((current) => [
+      ...current.slice(-(MESSAGE_STORAGE_LIMIT - 2)),
+      userMessage,
+      { id: pendingId, role: "assistant", text: baseVibe ? "正在沿着这张唱片重新取样..." : "正在刻录一张新的唱片...", status: "thinking" },
+    ]);
+    setInputValue("");
+    setGenerating(true);
 
     try {
-      const response = await fetch("/api/generate/stream", {
+      const target = baseVibe ? inferTarget(value) : undefined;
+      const requestAiConfig = hasUsableUserAiConfig(aiConfig) ? aiConfig : undefined;
+      const response = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: value }),
+        body: JSON.stringify({
+          prompt: value,
+          conversationHistory: toConversationHistory(nextHistory, MAX_CONVERSATION_MESSAGES),
+          maxConversationMessages: MAX_CONVERSATION_MESSAGES,
+          aiConfig: requestAiConfig,
+          baseVibe,
+          regenerateTarget: target,
+        }),
       });
-
-      if (!response.ok || !response.body) {
-        const data = (await response.json().catch(() => ({}))) as { error?: string; detail?: string };
-        throw new Error(data.error || data.detail || "刻录请求失败。");
+      const data = (await response.json()) as GenerateResponse;
+      if (!response.ok || !data.vibe) {
+        throw new Error(data.error || data.detail || "生成失败，请稍后再试。");
       }
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value: chunk } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(chunk, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          const event = JSON.parse(line) as StreamEvent;
-          handleStreamEvent(event);
-
-          if (event.type === "result" && event.vibe) {
-            const completedAt = event.at ?? nowIso();
-            updateSession((current) => ({
-              ...current,
-              status: "completed",
-              vibe: event.vibe,
-              logs: [
-                ...current.logs,
-                {
-                  id: "done",
-                  label: "唱片刻录完成",
-                  status: "completed",
-                  at: completedAt,
-                },
-              ],
-              updatedAt: completedAt,
-            }));
-            onGenerated(event.vibe, value);
-            setOpen(false);
-          }
-        }
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "生成失败，请稍后再试。";
-      const at = nowIso();
-      updateSession((current) => ({
-        ...current,
-        status: "error",
-        error: message,
-        logs: [...current.logs, { id: "error", label: "刻录失败", status: "error", at, message }],
-        updatedAt: at,
-      }));
+      setLatestVibe(data.vibe);
+      onGenerated(data.vibe, value, target === "visual" ? "artwork" : "music");
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === pendingId
+            ? {
+                ...message,
+                text: data.fallback ? "已先完成一版，可以试听这张唱片。" : "已完成。点这张唱片进入播放器，或继续告诉我怎么改。",
+                status: "done",
+                vibe: data.vibe,
+              }
+            : message,
+        ),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "生成失败，请稍后再试。";
+      setMessages((current) =>
+        current.map((item) => (item.id === pendingId ? { ...item, text: message, status: "error" } : item)),
+      );
+    } finally {
+      setGenerating(false);
     }
   }
 
-  const recorderDialog =
-    open && typeof document !== "undefined"
-      ? createPortal(
-          <div
-            className="vibe-recorder"
-            role="dialog"
-            aria-modal="true"
-            aria-label="刻录新氛围"
-            style={{
-              ["--accent" as string]: accent,
-              ["--accent-2" as string]: accent2,
-              ["--scene-accent" as string]: accent,
-            }}
-            onMouseDown={(event) => {
-              if (event.target === event.currentTarget) setOpen(false);
-            }}
-          >
-            <div className="vibe-recorder__panel">
-              <button type="button" className="vibe-recorder__close" aria-label="关闭" onClick={() => setOpen(false)}>
-                ×
-              </button>
-
-              <div className={`vibe-recorder__record ${generating ? "is-cutting" : ""}`} aria-hidden="true">
-                <span className="vibe-recorder__label">REC</span>
-              </div>
-
-              <div className="vibe-recorder__form">
-                <span className="vibe-recorder__kicker mono">PRIVATE PRESSING</span>
-                <h2>写一句，刻成声音</h2>
-                <textarea
-                  value={prompt}
-                  onChange={(event) => setPrompt(event.target.value)}
-                  placeholder="雨夜便利店门口的低保真爵士"
-                  maxLength={600}
-                  autoFocus
-                  disabled={generating}
-                />
-
-                <div className="vibe-recorder__examples" aria-label="示例提示词">
-                  {EXAMPLES.map((example) => (
-                    <button key={example} type="button" onClick={() => setPrompt(example)} disabled={generating}>
-                      {example}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="vibe-recorder__status" aria-live="polite">
-                  <span className="mono">{statusText}</span>
-                  {session && <small>{session.prompt}</small>}
-                </div>
-
-                {session?.logs.length ? (
-                  <div className="vibe-recorder__logs">
-                    {session.logs.map((log, index) => (
-                      <div key={`${log.id}-${log.at}-${index}`} className={`vibe-recorder__log is-${log.status}`}>
-                        <span className="mono">{formatTime(log.at)}</span>
-                        <strong>{log.label}</strong>
-                        {log.message && <small>{log.message}</small>}
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-
-                {session?.error && <p className="vibe-prompt__error">{session.error}</p>}
-
-                <button className="vibe-recorder__submit" type="button" onClick={generate} disabled={generating}>
-                  {generating ? "刻录中..." : "开始刻录"}
-                </button>
-              </div>
-            </div>
-          </div>,
-          document.body,
-        )
-      : null;
+  const displayMessages =
+    messages.length > 0
+      ? messages
+      : [
+          {
+            id: "intro",
+            role: "assistant" as const,
+            text: "告诉我一个场景，或在打开一张唱片后回到这里继续修改它。",
+            status: "done" as const,
+          },
+        ];
 
   return (
-    <>
-      <button type="button" className="blank-record-slot" onClick={() => setOpen(true)}>
-        <span className="blank-record-slot__sleeve" aria-hidden="true">
-          <span className="blank-record-slot__disc" />
-        </span>
-        <span className="blank-record-slot__copy">
-          <span className="blank-record-slot__kicker mono">BLANK CUT</span>
-          <strong>{generating ? "正在刻录" : "刻一张新唱片"}</strong>
-          <small>{session ? `${statusText} · ${session.logs.length} 条日志` : "写下场景，开始刻录"}</small>
-        </span>
-      </button>
-      {recorderDialog}
-    </>
+    <section
+      className={`vibe-dialog ${generating ? "is-thinking" : ""}`}
+      style={{
+        ["--accent" as string]: accent,
+        ["--accent-2" as string]: accent2,
+      }}
+      aria-label="氛围对话框"
+    >
+      <div className="vibe-dialog__head">
+        <div>
+          <span className="vibe-dialog__kicker mono">{targetLabel}</span>
+          <h2>氛围手札</h2>
+        </div>
+        <span className="vibe-dialog__context">{contextLabel}</span>
+      </div>
+
+      <div className="vibe-dialog__messages" aria-live="polite">
+        {displayMessages.map((message) => (
+          <article key={message.id} className={`vibe-dialog__message is-${message.role} ${message.status ? `is-${message.status}` : ""}`}>
+            <p>{message.text}</p>
+            {message.vibe && (
+              <button type="button" className="vibe-dialog__result" onClick={() => onOpenVibe?.(message.vibe!)}>
+                <span aria-hidden="true">{message.vibe.glyph}</span>
+                <strong>{message.vibe.name}</strong>
+                <small className="mono">{message.vibe.subtitle}</small>
+              </button>
+            )}
+          </article>
+        ))}
+      </div>
+
+      {(latestVibe || baseVibe) && (
+        <button type="button" className="vibe-dialog__record" onClick={() => onOpenVibe?.(latestVibe ?? baseVibe!)}>
+          <span className="vibe-dialog__record-disc" aria-hidden="true" />
+          <span>
+            <strong>{(latestVibe ?? baseVibe)?.name}</strong>
+            <small>{latestVibe ? "最新结果，可进入播放器" : "当前修改对象"}</small>
+          </span>
+        </button>
+      )}
+
+      <div className="vibe-dialog__examples" aria-label="示例提示词">
+        {EXAMPLES.map((example) => (
+          <button key={example} type="button" onClick={() => setInputValue(example)} disabled={generating}>
+            {example}
+          </button>
+        ))}
+      </div>
+
+      <div className="vibe-dialog__composer">
+        <button
+          type="button"
+          className={`voice-button ${generating ? "is-listening" : ""}`}
+          aria-label="语音输入动效"
+          onClick={() => setInputValue((value) => value || "把它改得更安静一点")}
+        >
+          <span />
+        </button>
+        <textarea
+          ref={textareaRef}
+          value={inputValue}
+          onChange={(event) => setInputValue(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              void submit();
+            }
+          }}
+          disabled={generating}
+          placeholder="输入一句场景，或继续说怎么修改这张唱片"
+          maxLength={600}
+        />
+        <button type="button" className="vibe-dialog__send" onClick={() => void submit()} disabled={generating || inputValue.trim().length < 3}>
+          {generating ? <span className="vibe-dialog__spinner" aria-hidden="true" /> : "写入"}
+        </button>
+      </div>
+    </section>
   );
 }

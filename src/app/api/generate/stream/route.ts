@@ -1,4 +1,5 @@
 import { generateVibeFromPrompt } from "@/ai/generate";
+import { sanitizeUserAiConfig } from "@/ai/userConfig";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -51,8 +52,9 @@ export async function POST(request: Request) {
     return Response.json({ error: "生成太频繁了，请稍后再试。" }, { status: 429 });
   }
 
-  const body = (await request.json()) as { prompt?: unknown };
+  const body = (await request.json()) as { prompt?: unknown; aiConfig?: unknown };
   const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+  const aiConfig = sanitizeUserAiConfig(body.aiConfig);
 
   if (prompt.length < 3) {
     return Response.json({ error: "请至少描述 3 个字符的氛围。" }, { status: 400 });
@@ -80,6 +82,7 @@ export async function POST(request: Request) {
         send({ type: "log", message: "刻录请求已接收" });
 
         const result = await generateVibeFromPrompt(prompt, {
+          aiConfig,
           onStage(stage) {
             console.info("[vibelive:generate] stage", stage);
             send({ type: "stage", stage });

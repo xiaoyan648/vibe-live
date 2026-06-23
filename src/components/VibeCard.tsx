@@ -5,13 +5,17 @@ import type { Vibe } from "@/data/vibes";
 interface Props {
   vibe: Vibe;
   onSelect: (vibe: Vibe) => void;
+  onPreview?: (vibe: Vibe) => void;
+  active?: boolean;
 }
 
-export default function VibeCard({ vibe, onSelect }: Props) {
+export default function VibeCard({ vibe, onSelect, onPreview, active = false }: Props) {
   return (
     <button
-      className="card"
+      className={`card ${active ? "card--active" : ""}`}
       style={{ ["--c-accent" as string]: vibe.palette.accent }}
+      onMouseEnter={() => onPreview?.(vibe)}
+      onFocus={() => onPreview?.(vibe)}
       onClick={() => onSelect(vibe)}
     >
       <span className="card__wash" aria-hidden="true" />

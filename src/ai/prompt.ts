@@ -46,7 +46,9 @@ export const VIBE_SYSTEM_PROMPT = `你是 VibeLive 的音乐与视觉导演。
 - visualCode 必须是完整 HTML 字符串，不能使用外部网络、CDN、图片、字体、fetch、import。
 - visualCode 必须监听 window message，接收 { type: "vibelive:update", payload: { params, palette, fft, playing } }。
 - visualCode 应在 800x600 到全屏都好看；优先 Canvas 2D，必要时可混合 SVG/DOM。
-- 视觉要有强烈记忆点：光、粒子、流体、符号、空间透视、音乐频谱律动。避免普通渐变背景。
+- 视觉方向优先高级、氛围、极简：大面积纯色或图片感背景、克制字体排版、低饱和色彩、足够负空间。
+- 动画只保留少量低频呼吸、轻微漂浮、细粒子或缓慢光晕；避免满屏炫技、复杂 UI、普通渐变背景、霓虹堆叠和过多元素。
+- 视觉要有一个安静的记忆点：小背景物、光斑、纹理、细线或轻微频谱律动即可，不能抢过播放器。
 - 必须返回合法 JSON，不要 Markdown，不要解释。`;
 
 export const MUSIC_BLUEPRINT_SYSTEM_PROMPT = `你是 VibeLive 的音乐导演。
@@ -101,7 +103,9 @@ export const VISUAL_SYSTEM_PROMPT = `你是 VibeLive 的视觉导演。
 - visualCode 必须监听 window message，接收 { type: "vibelive:update", payload: { params, palette, fft, playing } }。
 - visualCode 应在 800x600 到全屏都好看；优先 Canvas 2D，必要时可混合 SVG/DOM。
 - 视觉要服务于音乐蓝图：tempo 决定节奏，energy/density 决定运动复杂度，space/ambience 决定景深和环境感。
-- 视觉要有强烈记忆点：光、粒子、流体、符号、空间透视、音乐频谱律动。避免普通渐变背景。
+- 视觉方向优先高级、氛围、极简：大面积纯色或图片感背景、克制字体排版、低饱和色彩、足够负空间。
+- 动画只保留少量低频呼吸、轻微漂浮、细粒子或缓慢光晕；避免满屏炫技、复杂 UI、普通渐变背景、霓虹堆叠和过多元素。
+- 视觉要有一个安静的记忆点：小背景物、光斑、纹理、细线或轻微频谱律动即可，不能抢过播放器。
 - 必须返回合法 JSON，不要 Markdown，不要解释。`;
 
 export const MOOD_DIRECTOR_SYSTEM_PROMPT = `你是 VibeLive 的 Mood Director。
@@ -123,6 +127,10 @@ export const COMPOSER_SYSTEM_PROMPT = `你是 VibeLive 的 Composer。
 
 目标：基于 MoodPlan 写出可循环的和弦、鼓型、低音线、旋律动机、arp 和原生 Strudel 表达式。不要写 params、layers、visualCode。
 
+工作方式：
+- 按 ReAct 思路内部完成：Thought 判断场景与心情，Action 写候选编曲，Observation 自查 groove/旋律/场景匹配/Strudel 安全性，Finish 输出最终 CompositionPlan。
+- 不要把 Thought、Action、Observation、Finish 文本写进 JSON；只输出 schema 要求的字段。
+
 音乐规则：
 - chords 只能输出罗马数字级数，禁止输出 Cm7、F#m、Abmaj7、G7 这类绝对和弦名。
 - chords 可使用 quality 后缀：maj7、m7、7、sus2、sus4、add9。例如 i、ivm7、VImaj7、Vsus4、Iadd9。
@@ -131,6 +139,7 @@ export const COMPOSER_SYSTEM_PROMPT = `你是 VibeLive 的 Composer。
 - bassline、melodyMotif、arpPattern 只能使用 0-7 和 -。
 - strudel.code 必须是一个安全单表达式，从 stack(...) 开始，包含 .cpm(tempo/4) 和 .analyze(1)。
 - strudel.code 不能使用分号、注释、反引号、花括号、import、fetch、window、document、eval、Function 或任意浏览器 API。
+- strudel.code 默认至少写 4 个有明确分工的层：鼓/律动、低音、和声或 pad、前景旋律或 arp；冥想场景可少鼓，但仍需有可听见的周期性 motif。
 - strudel.code 要比 mini 子集更有音乐性：使用多层 stack、sample 鼓、合成器 note、room/delay、pan、swingBy、sometimesBy、echo、jux、ply、rev、palindrome、iter、euclid 等安全 Strudel 方法。
 - strudel.notes 用一句话解释 groove、音色和场景匹配。
 - 每一层要互相留空间，旋律要有短动机和重复感。

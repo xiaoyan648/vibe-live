@@ -55,6 +55,13 @@ const rawMusicQualitySchema = z.object({
     .catch([]),
 });
 
+const rawArtworkSchema = z.object({
+  imageUrl: z.string().url().catch(""),
+  prompt: z.string().max(2400).catch(""),
+  model: z.string().max(120).catch(""),
+  createdAt: z.string().max(48).catch(""),
+});
+
 const rawPatternSchema = z.object({
   root: z.string().min(1).catch("C"),
   scale: z.enum(SCALE_TYPES).catch("minorPentatonic"),
@@ -106,6 +113,7 @@ export const generatedVibeSchema = z.object({
   pattern: rawPatternSchema,
   musicQuality: rawMusicQualitySchema.optional(),
   visualCode: z.string().max(22000).catch(""),
+  artwork: rawArtworkSchema.optional(),
 });
 
 export type GeneratedVibeInput = z.input<typeof generatedVibeSchema>;
@@ -479,6 +487,7 @@ export function normalizeGeneratedVibe(input: unknown): Vibe {
     },
     musicQuality: normalizeMusicQuality(parsed.musicQuality),
     visualCode: parsed.visualCode,
+    artwork: parsed.artwork?.imageUrl ? parsed.artwork : undefined,
     source: "ai",
   };
 }

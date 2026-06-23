@@ -29,16 +29,28 @@ class VibeAudioEngine {
   private appliedCode = "";
   private started = false;
   private applying?: Promise<void>;
+  private applyTimer?: ReturnType<typeof setTimeout>;
 
   load(vibe: Vibe, params: VibeParams) {
     this.currentVibe = vibe;
     this.currentParams = params;
-    this.currentCode = buildStrudelCode(vibe, params, { preferNative: false });
+    this.currentCode = buildStrudelCode(vibe, params);
     if (this.started) {
+      this.scheduleApplyPattern();
+    }
+  }
+
+  private scheduleApplyPattern() {
+    if (this.applyTimer) {
+      clearTimeout(this.applyTimer);
+    }
+
+    this.applyTimer = setTimeout(() => {
+      this.applyTimer = undefined;
       void this.applyPattern().catch(() => {
         this.started = false;
       });
-    }
+    }, 80);
   }
 
   applyParams(params: VibeParams) {
@@ -48,8 +60,12 @@ class VibeAudioEngine {
 
   async start() {
     const runtime = await this.ensureRuntime();
+    if (this.applyTimer) {
+      clearTimeout(this.applyTimer);
+      this.applyTimer = undefined;
+    }
     if (!this.currentCode && this.currentVibe && this.currentParams) {
-      this.currentCode = buildStrudelCode(this.currentVibe, this.currentParams, { preferNative: false });
+      this.currentCode = buildStrudelCode(this.currentVibe, this.currentParams);
     }
     await this.applyPattern();
     await runtime.getAudioContext().resume?.();
@@ -58,11 +74,19 @@ class VibeAudioEngine {
   }
 
   pause() {
+    if (this.applyTimer) {
+      clearTimeout(this.applyTimer);
+      this.applyTimer = undefined;
+    }
     this.runtime?.repl.pause();
     this.started = false;
   }
 
   stop() {
+    if (this.applyTimer) {
+      clearTimeout(this.applyTimer);
+      this.applyTimer = undefined;
+    }
     this.runtime?.repl.stop();
     this.started = false;
   }
@@ -77,13 +101,27 @@ class VibeAudioEngine {
   }
 
   private async applyPattern() {
+    if (this.applying) {
+      await this.applying.catch(() => undefined);
+    }
+
     const runtime = await this.ensureRuntime();
     const code = this.currentCode;
     if (!code || code === this.appliedCode) return;
-    this.applying = runtime.repl.evaluate(code, false, true).then(() => {
-      this.appliedCode = code;
-    });
+
+    this.applying = runtime.repl
+      .evaluate(code, false, true)
+      .then(() => {
+        this.appliedCode = code;
+      })
+      .finally(() => {
+        this.applying = undefined;
+      });
     await this.applying;
+
+    if (this.currentCode && this.currentCode !== this.appliedCode) {
+      await this.applyPattern();
+    }
   }
 
   private async ensureRuntime() {

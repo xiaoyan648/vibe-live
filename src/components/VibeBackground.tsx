@@ -35,6 +35,11 @@ interface Particle {
   seed: number;
 }
 
+function cssImageUrl(url?: string) {
+  if (!url) return undefined;
+  return `url("${url.replace(/["\\\n\r]/g, "")}")`;
+}
+
 // 这套视觉是产品的主角：跟随 vibe 主色与参数实时变化。
 // 没有声音时，用时间驱动的伪振幅模拟“呼吸 / 律动”；有 Strudel analyser
 // 数据时，背景会优先响应真实频谱。
@@ -86,15 +91,24 @@ export default function VibeBackground({ vibe, params, playing, fft = [] }: Prop
 
     let t = 0;
     let raf = 0;
+    let lastDraw = 0;
 
-    function frame() {
+    function frame(now: number) {
       const { vibe, params, playing, fft } = state.current;
+      const targetFrameTime = reduceMotion ? 250 : playing ? 1000 / 45 : 1000 / 30;
+      if (now - lastDraw < targetFrameTime) {
+        raf = requestAnimationFrame(frame);
+        return;
+      }
+      const elapsedScale = lastDraw ? Math.min(2, (now - lastDraw) / (1000 / 60)) : 1;
+      lastDraw = now;
+
       const accent = hexToRgb(vibe.palette.accent);
       const accent2 = hexToRgb(vibe.palette.accent2);
       const base = hexToRgb(vibe.palette.base);
 
       const speed = reduceMotion ? 0 : (playing ? 1 : 0.28) * (0.4 + params.energy);
-      t += 0.006 * (0.5 + speed);
+      t += 0.006 * (0.5 + speed) * elapsedScale;
 
       const fftEnergy = fft.length ? fft.reduce((sum, value) => sum + value, 0) / fft.length : 0;
       // 有真实音频时使用 FFT；无音频数据时保留伪律动作为兜底。
@@ -292,5 +306,16 @@ export default function VibeBackground({ vibe, params, playing, fft = [] }: Prop
     };
   }, []);
 
-  return <canvas ref={canvasRef} className="stage__canvas" aria-hidden="true" />;
+  return (
+    <>
+      {vibe.artwork?.imageUrl && (
+        <div
+          className="stage__artwork-bg"
+          style={{ backgroundImage: cssImageUrl(vibe.artwork.imageUrl) }}
+          aria-hidden="true"
+        />
+      )}
+      <canvas ref={canvasRef} className="stage__canvas" aria-hidden="true" />
+    </>
+  );
 }

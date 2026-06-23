@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
+import { getMaxConversationMessages, normalizeConversationHistory } from "@/ai/conversation";
 import { generateVibeFromPrompt, regenerateVibeFromPrompt } from "@/ai/generate";
 import { fallbackGeneratedVibe } from "@/ai/schema";
+import { sanitizeUserAiConfig } from "@/ai/userConfig";
 import { REGENERATE_TARGETS, type RegenerateTarget } from "@/data/regeneration";
 import { enforceMusicQuality } from "@/music/quality";
 
@@ -55,6 +57,14 @@ function isProviderAuthError(error: unknown) {
   );
 }
 
+function isMissingAiConfig(message: string) {
+  return (
+    message.includes("Missing OPENAI_API_KEY") ||
+    message.includes("Missing OPENAI_MODEL") ||
+    message.includes("Missing ARK_")
+  );
+}
+
 export async function POST(request: Request) {
   let promptForFallback = "";
 
@@ -67,7 +77,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "生成太频繁了，请稍后再试。" }, { status: 429 });
     }
 
-    const body = (await request.json()) as { prompt?: unknown; baseVibe?: unknown; regenerateTarget?: unknown };
+    const body = (await request.json()) as {
+      prompt?: unknown;
+      conversationHistory?: unknown;
+      maxConversationMessages?: unknown;
+      aiConfig?: unknown;
+      baseVibe?: unknown;
+      regenerateTarget?: unknown;
+    };
     const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
     promptForFallback = prompt;
 
@@ -83,10 +100,20 @@ export async function POST(request: Request) {
       typeof body.regenerateTarget === "string" && REGENERATE_TARGET_SET.has(body.regenerateTarget as RegenerateTarget)
         ? (body.regenerateTarget as RegenerateTarget)
         : undefined;
+    const maxConversationMessages = Math.min(
+      getMaxConversationMessages(),
+      getMaxConversationMessages(body.maxConversationMessages),
+    );
+    const conversationHistory = normalizeConversationHistory(body.conversationHistory, maxConversationMessages);
+    const generationOptions = {
+      conversationHistory,
+      maxConversationMessages,
+      aiConfig: sanitizeUserAiConfig(body.aiConfig),
+    };
     const result =
       body.baseVibe && regenerateTarget
-        ? await regenerateVibeFromPrompt(prompt, body.baseVibe, regenerateTarget)
-        : await generateVibeFromPrompt(prompt);
+        ? await regenerateVibeFromPrompt(prompt, body.baseVibe, regenerateTarget, generationOptions)
+        : await generateVibeFromPrompt(prompt, generationOptions);
 
     return NextResponse.json(result);
   } catch (error) {
@@ -109,18 +136,19 @@ export async function POST(request: Request) {
               status: quality.report.repaired ? "repaired" : "completed",
             },
           ],
-          warning: "AI 服务鉴权失败，已使用本地 fallback 生成。请检查 ARK_API_KEY 与 ARK_MODEL。",
+          warning: "AI 服务鉴权失败，已使用本地 fallback 生成。请检查本地 AI 配置，或开发环境的 OPENAI_* / ARK_* 配置。",
         },
         { status: 200 },
       );
     }
 
-    const status = message.includes("Missing ARK_") ? 500 : 502;
+    const missingConfig = isMissingAiConfig(message);
+    const status = missingConfig ? 500 : 502;
 
     return NextResponse.json(
       {
-        error: message.includes("Missing ARK_")
-          ? "AI 服务环境变量未配置，请检查 ARK_API_KEY 与 ARK_MODEL。"
+        error: missingConfig
+          ? "AI 配置未完成，请填写本地 API Key、Base URL 与 Model；开发环境也可使用 OPENAI_* / ARK_* 变量。"
           : "AI 生成暂时失败，请稍后再试。",
         detail: process.env.NODE_ENV === "development" ? message : undefined,
       },
