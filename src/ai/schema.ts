@@ -1,11 +1,19 @@
 import { z } from "zod";
-import { VIBES, type LayerType, type ScaleType, type Vibe, type VisualType } from "@/data/vibes";
+import {
+  VIBES,
+  type ArrangementRoleType,
+  type LayerType,
+  type ScaleType,
+  type Vibe,
+  type VisualType,
+} from "@/data/vibes";
 import { NOTE_ROOTS, ROMAN_CHORD_SYMBOLS, normalizeChordProgression, normalizeRootNote } from "@/music/chords";
 import { sanitizeStrudelCode } from "@/music/strudelSafety";
 
 const VISUAL_TYPES = ["orbs", "rain", "particles", "waves", "cosmos"] as const;
 const SCALE_TYPES = ["major", "minor", "minorPentatonic", "majorPentatonic", "dorian", "lydian"] as const;
 const LAYER_TYPES = ["drums", "bass", "pad", "melody", "arp"] as const;
+const ARRANGEMENT_ROLES = ["ambience", "drums", "bass", "chords", "motif", "countermelody", "transition"] as const;
 
 const hexColor = /^#[0-9a-fA-F]{6}$/;
 
@@ -39,6 +47,38 @@ const rawStrudelSchema = z.object({
   version: z.literal(1).catch(1),
   code: z.string().max(5200).catch(""),
   notes: z.string().max(240).optional().catch(undefined),
+});
+
+const rawArrangementRoleSchema = z.object({
+  role: z.enum(ARRANGEMENT_ROLES).catch("motif"),
+  instrument: z.string().min(1).max(80).catch("triangle synth"),
+  purpose: z.string().min(1).max(120).catch("支撑场景氛围。"),
+  pattern: z.string().min(1).max(120).catch("16 step loop with space."),
+  register: z.enum(["low", "mid", "high", "wide"]).catch("mid"),
+  gain: z.coerce.number().catch(0.2),
+  motion: z.enum(["static", "slow", "pulse", "syncopated", "sparkle"]).catch("slow"),
+});
+
+const rawArrangementSchema = z.object({
+  form: z.string().min(1).max(160).catch("8-bar loop with subtle A/B variation."),
+  keyMood: z.string().min(1).max(160).catch("scene-matched tonal center."),
+  chordPalette: z.string().min(1).max(160).catch("four-chord palette with restrained voicings."),
+  roles: z.array(rawArrangementRoleSchema).min(3).max(7).catch([]),
+  mix: z
+    .object({
+      masterGain: z.coerce.number().catch(0.82),
+      peakCeilingDb: z.coerce.number().catch(-1),
+      ambienceGain: z.coerce.number().catch(0.02),
+      foreground: z.string().min(1).max(80).catch("melody motif"),
+      notes: z.string().min(1).max(180).catch("Keep ambience below the foreground."),
+    })
+    .catch({
+      masterGain: 0.82,
+      peakCeilingDb: -1,
+      ambienceGain: 0.02,
+      foreground: "melody motif",
+      notes: "Keep ambience below the foreground.",
+    }),
 });
 
 const rawMusicQualitySchema = z.object({
@@ -76,6 +116,7 @@ const rawPatternSchema = z.object({
   }),
   mini: rawMiniSchema.optional(),
   strudel: rawStrudelSchema.optional(),
+  arrangement: rawArrangementSchema.optional(),
 });
 
 export const generatedVibeSchema = z.object({
@@ -159,7 +200,7 @@ export const vibeJsonSchema = {
       pattern: {
         type: "object",
         additionalProperties: false,
-        required: ["root", "scale", "chords", "seed", "layers", "mini", "strudel"],
+        required: ["root", "scale", "chords", "seed", "layers", "mini", "strudel", "arrangement"],
         properties: {
           root: { type: "string", enum: NOTE_ROOTS },
           scale: { type: "string", enum: SCALE_TYPES },
@@ -263,6 +304,59 @@ export const vibeJsonSchema = {
               },
             },
           },
+          arrangement: {
+            type: "object",
+            additionalProperties: false,
+            required: ["form", "keyMood", "chordPalette", "roles", "mix"],
+            properties: {
+              form: {
+                type: "string",
+                maxLength: 160,
+                description: "Phrase form, e.g. 8-bar A/B loop with one restrained transition.",
+              },
+              keyMood: {
+                type: "string",
+                maxLength: 160,
+                description: "Tonal and emotional direction.",
+              },
+              chordPalette: {
+                type: "string",
+                maxLength: 160,
+                description: "How chord qualities and voicings support the scene.",
+              },
+              roles: {
+                type: "array",
+                minItems: 4,
+                maxItems: 7,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["role", "instrument", "purpose", "pattern", "register", "gain", "motion"],
+                  properties: {
+                    role: { type: "string", enum: ARRANGEMENT_ROLES },
+                    instrument: { type: "string", maxLength: 80 },
+                    purpose: { type: "string", maxLength: 120 },
+                    pattern: { type: "string", maxLength: 120 },
+                    register: { type: "string", enum: ["low", "mid", "high", "wide"] },
+                    gain: { type: "number", minimum: 0, maximum: 0.9 },
+                    motion: { type: "string", enum: ["static", "slow", "pulse", "syncopated", "sparkle"] },
+                  },
+                },
+              },
+              mix: {
+                type: "object",
+                additionalProperties: false,
+                required: ["masterGain", "peakCeilingDb", "ambienceGain", "foreground", "notes"],
+                properties: {
+                  masterGain: { type: "number", minimum: 0.55, maximum: 0.9 },
+                  peakCeilingDb: { type: "number", minimum: -6, maximum: -0.5 },
+                  ambienceGain: { type: "number", minimum: 0, maximum: 0.08 },
+                  foreground: { type: "string", maxLength: 80 },
+                  notes: { type: "string", maxLength: 180 },
+                },
+              },
+            },
+          },
         },
       },
       visualCode: {
@@ -315,11 +409,12 @@ export const compositionPlanJsonSchema = {
   schema: {
     type: "object",
     additionalProperties: false,
-    required: ["chords", "mini", "strudel"],
+    required: ["chords", "mini", "strudel", "arrangement"],
     properties: {
       chords: vibeJsonSchema.schema.properties.pattern.properties.chords,
       mini: vibeJsonSchema.schema.properties.pattern.properties.mini,
       strudel: vibeJsonSchema.schema.properties.pattern.properties.strudel,
+      arrangement: vibeJsonSchema.schema.properties.pattern.properties.arrangement,
     },
   },
 } as const;
@@ -428,6 +523,32 @@ function normalizeStrudelPattern(strudel: z.infer<typeof rawStrudelSchema> | und
   };
 }
 
+function normalizeArrangementPlan(arrangement: z.infer<typeof rawArrangementSchema> | undefined) {
+  if (!arrangement) return undefined;
+
+  return {
+    form: arrangement.form.trim(),
+    keyMood: arrangement.keyMood.trim(),
+    chordPalette: arrangement.chordPalette.trim(),
+    roles: arrangement.roles.slice(0, 7).map((role) => ({
+      role: role.role as ArrangementRoleType,
+      instrument: role.instrument.trim(),
+      purpose: role.purpose.trim(),
+      pattern: role.pattern.trim(),
+      register: role.register,
+      gain: clamp(role.gain, 0, 0.9),
+      motion: role.motion,
+    })),
+    mix: {
+      masterGain: clamp(arrangement.mix.masterGain, 0.55, 0.9),
+      peakCeilingDb: clamp(arrangement.mix.peakCeilingDb, -6, -0.5),
+      ambienceGain: clamp(arrangement.mix.ambienceGain, 0, 0.08),
+      foreground: arrangement.mix.foreground.trim(),
+      notes: arrangement.mix.notes.trim(),
+    },
+  };
+}
+
 function normalizeMusicQuality(quality: z.infer<typeof rawMusicQualitySchema> | undefined) {
   if (!quality) return undefined;
 
@@ -484,6 +605,7 @@ export function normalizeGeneratedVibe(input: unknown): Vibe {
       layers,
       mini: normalizeMiniPattern(parsed.pattern.mini),
       strudel: normalizeStrudelPattern(parsed.pattern.strudel),
+      arrangement: normalizeArrangementPlan(parsed.pattern.arrangement),
     },
     musicQuality: normalizeMusicQuality(parsed.musicQuality),
     visualCode: parsed.visualCode,

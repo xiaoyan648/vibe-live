@@ -5,12 +5,39 @@ export type VisualType = "orbs" | "rain" | "particles" | "waves" | "cosmos";
 export type VibeSource = "builtin" | "ai";
 export type ScaleType = "major" | "minor" | "minorPentatonic" | "majorPentatonic" | "dorian" | "lydian";
 export type LayerType = "drums" | "bass" | "pad" | "melody" | "arp";
+export type ArrangementRoleType = "ambience" | "drums" | "bass" | "chords" | "motif" | "countermelody" | "transition";
 
 export interface VibeLayerPattern {
   enabled: boolean;
   density: number;
   swing: number;
   octave?: number;
+}
+
+export interface VibeArrangementRole {
+  role: ArrangementRoleType;
+  instrument: string;
+  purpose: string;
+  pattern: string;
+  register: "low" | "mid" | "high" | "wide";
+  gain: number;
+  motion: "static" | "slow" | "pulse" | "syncopated" | "sparkle";
+}
+
+export interface VibeMixPlan {
+  masterGain: number;
+  peakCeilingDb: number;
+  ambienceGain: number;
+  foreground: string;
+  notes: string;
+}
+
+export interface VibeArrangementPlan {
+  form: string;
+  keyMood: string;
+  chordPalette: string;
+  roles: VibeArrangementRole[];
+  mix: VibeMixPlan;
 }
 
 export interface VibePattern {
@@ -36,6 +63,7 @@ export interface VibePattern {
     code: string;
     notes?: string;
   };
+  arrangement?: VibeArrangementPlan;
 }
 
 export interface VibeParams {
@@ -106,6 +134,85 @@ export interface Vibe {
   source?: VibeSource;
 }
 
+const BUILTIN_ARRANGEMENTS = {
+  neon: {
+    form: "8-bar A/B pulse: tight A groove, brighter arp answer every second phrase.",
+    keyMood: "late-night dorian/minor pentatonic, glass and voltage.",
+    chordPalette: "i / ivm7 / VImaj7 / VII with compact voicings.",
+    roles: [
+      { role: "drums", instrument: "dry bd, sd, closed hat", purpose: "keep the afterhours pulse precise", pattern: "syncopated kick with restrained backbeat", register: "mid", gain: 0.68, motion: "pulse" },
+      { role: "bass", instrument: "filtered sawtooth", purpose: "give the room a moving low grid", pattern: "short root/fifth cuts", register: "low", gain: 0.32, motion: "syncopated" },
+      { role: "chords", instrument: "thin sine pad", purpose: "hold glassy harmony without haze", pattern: "four-chord loop", register: "mid", gain: 0.15, motion: "slow" },
+      { role: "motif", instrument: "sine lead", purpose: "make the record memorable", pattern: "three-note upward neon tag", register: "high", gain: 0.2, motion: "sparkle" },
+      { role: "ambience", instrument: "distant city pink noise", purpose: "hint at the street outside", pattern: "low bed only", register: "wide", gain: 0.018, motion: "static" },
+    ],
+    mix: { masterGain: 0.84, peakCeilingDb: -1, ambienceGain: 0.018, foreground: "motif and kick", notes: "Keep saw layers narrow and let the compressor catch arp peaks." },
+  },
+  rain: {
+    form: "16-step lofi loop with a soft melodic answer at the end of each phrase.",
+    keyMood: "minor pentatonic, warm tape and window rain.",
+    chordPalette: "im7 / ivm7 / VImaj7 / v with slow voice movement.",
+    roles: [
+      { role: "ambience", instrument: "filtered rain noise", purpose: "place the listener at the window", pattern: "fine highpassed bed", register: "wide", gain: 0.042, motion: "static" },
+      { role: "drums", instrument: "soft bd, brushed sd, loose hat", purpose: "make reading feel paced", pattern: "swinging sparse lofi groove", register: "mid", gain: 0.42, motion: "pulse" },
+      { role: "bass", instrument: "triangle bass", purpose: "carry the chord roots gently", pattern: "root and color tones", register: "low", gain: 0.24, motion: "slow" },
+      { role: "chords", instrument: "sine pad", purpose: "warm the glass without mud", pattern: "long minor seventh voicings", register: "mid", gain: 0.18, motion: "slow" },
+      { role: "motif", instrument: "soft triangle", purpose: "answer the rain with a short phrase", pattern: "descending window motif", register: "high", gain: 0.14, motion: "slow" },
+    ],
+    mix: { masterGain: 0.82, peakCeilingDb: -1.2, ambienceGain: 0.042, foreground: "soft triangle motif", notes: "Rain is audible but tucked behind the phrase." },
+  },
+  meditation: {
+    form: "long 4-bar breathing cycle with tiny light points.",
+    keyMood: "dorian, cool synthetic calm.",
+    chordPalette: "i / IV / i / VII, open and slow.",
+    roles: [
+      { role: "bass", instrument: "sine sub pulse", purpose: "create a slow breath", pattern: "wide rests between root tones", register: "low", gain: 0.18, motion: "slow" },
+      { role: "chords", instrument: "sine pad", purpose: "hold the room open", pattern: "long dorian voicings", register: "wide", gain: 0.22, motion: "static" },
+      { role: "motif", instrument: "triangle light point", purpose: "avoid pure drone", pattern: "small repeating constellation", register: "high", gain: 0.15, motion: "sparkle" },
+      { role: "ambience", instrument: "low space pink noise", purpose: "make the server room breathe", pattern: "barely-there low bed", register: "wide", gain: 0.014, motion: "slow" },
+    ],
+    mix: { masterGain: 0.8, peakCeilingDb: -1.5, ambienceGain: 0.014, foreground: "triangle light point", notes: "Beatless, but never only a drone." },
+  },
+  focus: {
+    form: "steady 8-bar desk groove with no large transitions.",
+    keyMood: "warm minor pentatonic, lamp-lit concentration.",
+    chordPalette: "im7 / VII / VImaj7 / VII with close voicings.",
+    roles: [
+      { role: "drums", instrument: "muted kick and hat", purpose: "stabilize work pace", pattern: "sparse kick, metronomic hat", register: "mid", gain: 0.36, motion: "pulse" },
+      { role: "bass", instrument: "triangle bass", purpose: "anchor the loop", pattern: "root-color-root movement", register: "low", gain: 0.28, motion: "slow" },
+      { role: "chords", instrument: "soft sine pad", purpose: "keep warmth under the melody", pattern: "restrained four-chord loop", register: "mid", gain: 0.15, motion: "static" },
+      { role: "motif", instrument: "triangle lead", purpose: "provide a small repeatable cue", pattern: "two-beat focused motif", register: "high", gain: 0.16, motion: "slow" },
+      { role: "ambience", instrument: "quiet room tone", purpose: "avoid sterile silence", pattern: "low bed", register: "wide", gain: 0.012, motion: "static" },
+    ],
+    mix: { masterGain: 0.83, peakCeilingDb: -1.2, ambienceGain: 0.012, foreground: "kick and motif", notes: "No sudden fills; stable level for long listening." },
+  },
+  forest: {
+    form: "walking 8-bar natural groove with leaf-like arp details.",
+    keyMood: "major pentatonic, moss, light and distance.",
+    chordPalette: "Iadd9 / V / vi / IVmaj7, open and green.",
+    roles: [
+      { role: "ambience", instrument: "brown wind noise", purpose: "suggest forest air and birds without literal samples", pattern: "filtered low wind bed", register: "wide", gain: 0.036, motion: "slow" },
+      { role: "drums", instrument: "soft bd, cp, hat", purpose: "turn steps into rhythm", pattern: "walking pulse with offbeat claps", register: "mid", gain: 0.42, motion: "pulse" },
+      { role: "bass", instrument: "triangle bass", purpose: "follow roots like footsteps", pattern: "root-fifth-step motion", register: "low", gain: 0.24, motion: "slow" },
+      { role: "chords", instrument: "triangle pad", purpose: "open the canopy", pattern: "add9 and maj7 voicings", register: "mid", gain: 0.15, motion: "slow" },
+      { role: "motif", instrument: "sine/triangle birdsong motif", purpose: "create the scene memory point", pattern: "short pentatonic call", register: "high", gain: 0.17, motion: "sparkle" },
+    ],
+    mix: { masterGain: 0.82, peakCeilingDb: -1.2, ambienceGain: 0.036, foreground: "birdlike motif", notes: "Air bed stays below melody; no muddy pad wash." },
+  },
+  space: {
+    form: "slow 4-bar drift with a subtle B shimmer from arp echoes.",
+    keyMood: "lydian, weightless blue distance.",
+    chordPalette: "I / II / V / I with wide intervals.",
+    roles: [
+      { role: "ambience", instrument: "low pink space noise", purpose: "create vacuum depth", pattern: "lowpass bed", register: "wide", gain: 0.018, motion: "slow" },
+      { role: "bass", instrument: "sine gravity tone", purpose: "stop the harmony from floating away", pattern: "rare root/fifth pulses", register: "low", gain: 0.16, motion: "slow" },
+      { role: "chords", instrument: "wide sine pad", purpose: "make the nebula bloom", pattern: "long lydian voicings", register: "wide", gain: 0.23, motion: "static" },
+      { role: "motif", instrument: "triangle star tone", purpose: "give the listener a point to follow", pattern: "sparse high phrase", register: "high", gain: 0.13, motion: "sparkle" },
+    ],
+    mix: { masterGain: 0.8, peakCeilingDb: -1.5, ambienceGain: 0.018, foreground: "star tone", notes: "Very wide but not louder than the foreground point." },
+  },
+} satisfies Record<string, VibeArrangementPlan>;
+
 export const VIBES: Vibe[] = [
   {
     id: "cyber-night",
@@ -160,6 +267,7 @@ export const VIBES: Vibe[] = [
 ).cpm(26).analyze(1).sometimesBy(.2, x => x.jux(rev))`,
         notes: "Tight neon pulse with syncopated bass, glassy motif, and a thin saw arp for late-night focus.",
       },
+      arrangement: BUILTIN_ARRANGEMENTS.neon,
     },
     source: "builtin",
   },
@@ -216,6 +324,7 @@ export const VIBES: Vibe[] = [
 ).cpm(18).analyze(1).sometimesBy(.12, x => x.echo(2, 1/8, .24))`,
         notes: "Loose brushed lo-fi groove, warm bass movement, and a small rainy-window melodic answer.",
       },
+      arrangement: BUILTIN_ARRANGEMENTS.rain,
     },
     source: "builtin",
   },
@@ -269,6 +378,7 @@ export const VIBES: Vibe[] = [
 ).cpm(14.5).analyze(1).sometimesBy(.14, x => x.ply(2).gain(.7))`,
         notes: "Beatless synthetic breathing with a low pulse, slow dorian pad, and small periodic light points.",
       },
+      arrangement: BUILTIN_ARRANGEMENTS.meditation,
     },
     source: "builtin",
   },
@@ -324,6 +434,7 @@ export const VIBES: Vibe[] = [
 ).cpm(20.5).analyze(1).sometimesBy(.1, x => x.echo(2, 1/8, .2))`,
         notes: "Soft study groove with a steady kick, warm bass, and a restrained motif that avoids distraction.",
       },
+      arrangement: BUILTIN_ARRANGEMENTS.focus,
     },
     source: "builtin",
   },
@@ -380,6 +491,7 @@ export const VIBES: Vibe[] = [
 ).cpm(19.5).analyze(1).sometimesBy(.14, x => x.echo(2, 1/8, .25))`,
         notes: "Organic walking pulse with soft percussion, bright pentatonic melody, and small echoing leaf-like arps.",
       },
+      arrangement: BUILTIN_ARRANGEMENTS.forest,
     },
     source: "builtin",
   },
@@ -433,6 +545,7 @@ export const VIBES: Vibe[] = [
 ).cpm(13).analyze(1).sometimesBy(.12, x => x.ply(2).gain(.68))`,
         notes: "Weightless lydian drift with slow bass gravity, wide pad bloom, and sparse star-like motifs.",
       },
+      arrangement: BUILTIN_ARRANGEMENTS.space,
     },
     source: "builtin",
   },

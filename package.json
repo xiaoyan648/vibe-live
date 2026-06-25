@@ -2,9 +2,16 @@
   "name": "vibe-live",
   "version": "0.1.0",
   "private": true,
+  "description": "A local-first ambient record generator and player.",
+  "author": "VibeLive",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:desktop:web": "node scripts/build-desktop.mjs",
+    "desktop:dev": "node scripts/dev-electron.mjs",
+    "desktop:pack": "npm run build:desktop:web && electron-builder --mac dir",
+    "desktop:dist": "npm run build:desktop:web && electron-builder --mac dmg zip",
     "start": "next start",
     "lint": "eslint .",
     "verify:music": "tsx scripts/verify-music-quality.ts",
@@ -30,9 +37,42 @@
     "@types/node": "22.15.3",
     "@types/react": "19.1.6",
     "@types/react-dom": "19.1.5",
+    "electron": "^42.4.1",
+    "electron-builder": "^26.15.3",
     "eslint": "9.28.0",
     "eslint-config-next": "^16.2.7",
     "tsx": "^4.22.4",
     "typescript": "5.8.3"
+  },
+  "build": {
+    "appId": "app.vibelive.desktop",
+    "productName": "VibeLive",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "files": [
+      "electron/**/*",
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.music",
+      "icon": "build/icon.icns",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "dmg": {
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    }
   }
 }

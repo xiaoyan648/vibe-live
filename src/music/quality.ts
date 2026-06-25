@@ -1,4 +1,5 @@
-import type { ScaleType, Vibe, VibeParams, VibePattern } from "@/data/vibes";
+import type { ScaleType, Vibe, VibeArrangementPlan, VibeParams, VibePattern } from "@/data/vibes";
+import { estimateMixRisk } from "@/music/mixAnalysis";
 import { parseMiniPattern } from "@/music/miniPattern";
 
 export interface MusicQualityIssue {
@@ -339,6 +340,8 @@ function evaluateNativeStrudelCode(
   const delayValues = numericMethodArgs(outside, "delay");
   const hasCpm = /\.\s*cpm\s*\(/.test(outside);
   const hasAnalyzer = /\.\s*analyze\s*\(/.test(outside);
+  const hasCompressor = /\.\s*compressor\s*\(/.test(outside);
+  const hasPostgain = /\.\s*postgain\s*\(/.test(outside);
   const hasVariation = /\.\s*(sometimesBy|sometimes|echo|jux|ply|pan|swingBy|euclid|iter|palindrome|delay)\s*\(/.test(outside);
 
   if (!/^\s*stack\s*\(/.test(outside)) {
@@ -373,6 +376,10 @@ function evaluateNativeStrudelCode(
     addIssue(issues, "warn", "native-missing-analyze", "原生 Strudel 缺少 .analyze(1)，视觉频谱联动会由播放器兜底补齐。");
   }
 
+  if (!hasCompressor || !hasPostgain) {
+    addIssue(issues, "warn", "native-missing-mastering", "原生 Strudel 缺少 compressor/postgain，播放器会兜底但生成质量应主动留余量。");
+  }
+
   if (roomValues.some((value) => value > 0.72) || delayValues.some((value) => value > 0.45)) {
     addIssue(
       issues,
@@ -389,6 +396,47 @@ function evaluateNativeStrudelCode(
 
 function hasMinorHeavyProgression(pattern: VibePattern) {
   return pattern.chords.some((chord) => /^i($|m|v|i|7|sus|add)/.test(chord) && !/^iv?maj/i.test(chord));
+}
+
+function evaluateArrangementPlan(issues: MusicQualityIssue[], scene: Scene, pattern: VibePattern) {
+  const arrangement = pattern.arrangement;
+  if (!arrangement) {
+    addIssue(issues, "warn", "missing-arrangement-plan", "缺少结构化编曲计划，候选之间容易同质化。");
+    return;
+  }
+
+  const roles = arrangement.roles ?? [];
+  const roleSet = new Set(roles.map((role) => role.role));
+  const instrumentSet = new Set(roles.map((role) => role.instrument.toLowerCase().trim()).filter(Boolean));
+  const foreground = arrangement.mix.foreground.toLowerCase();
+  const ambienceRoles = roles.filter((role) => role.role === "ambience");
+  const foregroundRoles = roles.filter((role) => foreground.includes(role.role) || foreground.includes(role.instrument.toLowerCase()));
+  const maxForegroundGain = Math.max(0.12, ...foregroundRoles.map((role) => role.gain));
+  const maxAmbienceGain = Math.max(arrangement.mix.ambienceGain, ...ambienceRoles.map((role) => role.gain), 0);
+
+  if (roles.length < 4) {
+    addIssue(issues, "warn", "thin-arrangement-plan", "编曲角色少于 4 个，容易只剩模板循环。");
+  }
+
+  if (!roleSet.has("motif") && !roleSet.has("countermelody")) {
+    addIssue(issues, "fail", "arrangement-missing-motif", "编曲计划缺少可记忆前景动机。");
+  }
+
+  if (!roleSet.has("chords") && scene !== "neon") {
+    addIssue(issues, "warn", "arrangement-missing-chords", "编曲计划缺少和声角色，场景厚度可能不足。");
+  }
+
+  if (instrumentSet.size <= 2 && roles.length >= 4) {
+    addIssue(issues, "warn", "narrow-instrument-palette", "编曲计划音色过窄，需要更多材质差异。");
+  }
+
+  if (maxAmbienceGain > 0.08 || maxAmbienceGain > maxForegroundGain * 0.72) {
+    addIssue(issues, "fail", "ambience-over-foreground", "环境声增益接近或盖过前景声部。");
+  }
+
+  if (arrangement.mix.masterGain > 0.9 || arrangement.mix.peakCeilingDb > -0.5) {
+    addIssue(issues, "fail", "unsafe-mix-plan", "mix 计划缺少安全峰值余量。");
+  }
 }
 
 function addIssue(issues: MusicQualityIssue[], severity: MusicQualityIssue["severity"], code: string, message: string) {
@@ -437,8 +485,24 @@ export function evaluateMusicQuality(prompt: string, vibe: Vibe): MusicQualityRe
     mini.steps * 7,
   );
   const padDensity = pattern.layers.pad?.density ?? 0.4;
+  const mixRisk = estimateMixRisk(vibe);
 
   evaluateNativeStrudelCode(issues, scene, pattern, params);
+  evaluateArrangementPlan(issues, scene, pattern);
+
+  if (mixRisk.score < 58) {
+    addIssue(issues, "fail", "hot-mix-risk", "静态 mix 预检发现峰值风险过高，容易出现突然变大声。");
+  } else if (mixRisk.score < 76) {
+    addIssue(issues, "warn", "mix-headroom-low", "静态 mix 预检余量偏低，建议降低 layer gain 或 postgain。");
+  }
+
+  if (mixRisk.issues.includes("single-layer-hot")) {
+    addIssue(issues, "warn", "hot-layer-gain", "至少一个 Strudel layer gain 偏高。");
+  }
+
+  if (mixRisk.issues.includes("hot-variation")) {
+    addIssue(issues, "warn", "hot-variation-risk", "jux/ply/echo 与较高增益叠加，可能造成瞬时响度波动。");
+  }
 
   if (pattern.layers.drums?.enabled !== false) {
     if (kickRatio < 0.08) addIssue(issues, "warn", "weak-kick", "鼓组缺少低频重心。");
@@ -728,6 +792,91 @@ function repairPattern(scene: Scene, pattern: VibePattern): VibePattern {
   };
 }
 
+function repairArrangement(scene: Scene): VibeArrangementPlan {
+  const natural = scene === "forest" || scene === "coastal" || scene === "rain";
+  const dark = scene === "rain" || scene === "winter" || scene === "space";
+  const pulse = scene === "neon" || scene === "focus" ? "syncopated" : "pulse";
+  const ambienceInstrument =
+    scene === "rain"
+      ? "filtered rain noise"
+      : scene === "forest"
+        ? "brown wind and leaf noise"
+        : scene === "coastal"
+          ? "soft wave air noise"
+          : scene === "space"
+            ? "low pink space noise"
+            : scene === "neon"
+              ? "distant city bed"
+              : "quiet room air";
+
+  return {
+    form: scene === "space" || scene === "winter" ? "slow 4-bar drift with sparse light points" : "8-bar loop with restrained A/B variation",
+    keyMood: dark ? "darker modal color with clear foreground" : "clear scene-matched tonal center",
+    chordPalette: scene === "spring" || natural ? "open add9/maj7 voicings with light movement" : "compact four-chord palette with stable voice-leading",
+    roles: [
+      {
+        role: "ambience",
+        instrument: ambienceInstrument,
+        purpose: "place the listener in the scene without covering the music",
+        pattern: "low gain texture bed",
+        register: "wide",
+        gain: natural ? 0.036 : 0.018,
+        motion: scene === "space" ? "slow" : "static",
+      },
+      {
+        role: "drums",
+        instrument: scene === "neon" ? "dry bd, sd, closed hat" : "soft bd, cp, light hat",
+        purpose: "give the loop a mature pulse",
+        pattern: "sparse mature groove",
+        register: "mid",
+        gain: scene === "neon" ? 0.58 : 0.38,
+        motion: pulse,
+      },
+      {
+        role: "bass",
+        instrument: scene === "neon" ? "filtered sawtooth bass" : "triangle bass",
+        purpose: "anchor root motion",
+        pattern: "root and color-tone movement",
+        register: "low",
+        gain: 0.24,
+        motion: scene === "neon" ? "syncopated" : "slow",
+      },
+      {
+        role: "chords",
+        instrument: "soft sine or triangle pad",
+        purpose: "support harmony with restrained space",
+        pattern: "four-chord voicing loop",
+        register: "mid",
+        gain: 0.16,
+        motion: "slow",
+      },
+      {
+        role: "motif",
+        instrument: scene === "neon" ? "glassy sine lead" : "soft triangle lead",
+        purpose: "create a memorable foreground",
+        pattern: "short repeating motif",
+        register: "high",
+        gain: 0.18,
+        motion: scene === "neon" || scene === "spring" ? "sparkle" : "slow",
+      },
+    ],
+    mix: {
+      masterGain: scene === "neon" ? 0.84 : 0.82,
+      peakCeilingDb: -1.2,
+      ambienceGain: natural ? 0.036 : 0.018,
+      foreground: "motif",
+      notes: "Keep ambience below motif and leave compressor headroom for phrase variation.",
+    },
+  };
+}
+
+function withRepairArrangement(scene: Scene, pattern: VibePattern): VibePattern {
+  return {
+    ...pattern,
+    arrangement: pattern.arrangement ?? repairArrangement(scene),
+  };
+}
+
 function withQuality(vibe: Vibe, report: MusicQualityReport): Vibe {
   return {
     ...vibe,
@@ -748,7 +897,7 @@ export function enforceMusicQuality(prompt: string, vibe: Vibe): MusicQualityRes
   }
 
   const scene = detectScene(prompt, vibe);
-  const repairedPattern = repairPattern(scene, vibe.pattern);
+  const repairedPattern = withRepairArrangement(scene, repairPattern(scene, vibe.pattern));
   const repairedVibe: Vibe = {
     ...vibe,
     params: repairParams(scene, vibe.params),

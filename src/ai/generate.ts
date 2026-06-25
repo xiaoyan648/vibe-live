@@ -1,4 +1,4 @@
-import { createOpenAIClient, getAiConfig, type AiRequestConfig } from "./client";
+import { createChatCompletion, getAiConfig, type AiRequestConfig } from "./client";
 import {
   buildPromptWithConversation,
   getMaxConversationMessages,
@@ -30,8 +30,10 @@ import {
   visualOutputSchema,
 } from "./schema";
 import { parseModelJson, runAgentStep, type AgentModelRequest, type AgentStage } from "./agent/runner";
+import { buildComposerKnowledgeContext } from "./knowledge/musicKnowledge";
 import type { RegenerateTarget } from "@/data/regeneration";
-import type { Vibe } from "@/data/vibes";
+import { VIBES, type Vibe } from "@/data/vibes";
+import { scoreVibeDiversity } from "@/music/diversity";
 import { enforceMusicQuality, evaluateMusicQuality, type MusicQualityIssue } from "@/music/quality";
 import type { ResponseFormatJSONSchema } from "openai/resources/shared";
 
@@ -48,7 +50,7 @@ const COMPOSER_CANDIDATE_COUNT = 3;
 const COMPOSER_CANDIDATE_DIRECTIONS = [
   "候选 A：旋律前景最重要。写出清楚、可哼唱、和场景一致的 motif，避免背景铺底抢戏。",
   "候选 B：groove 最重要。鼓组、低音与 arp 要形成成熟律动，但仍保持层次和留白。",
-  "候选 C：质感与空间最重要。保留细节、克制 ambience 和 pad 厚度，避免嗡嗡 drone。",
+  "候选 C：质感与差异最重要。保留细节、克制 ambience 和 pad 厚度，并主动避开默认唱片的节奏、和弦色彩和主音色。",
 ];
 
 function pushStage(stages: GenerationStage[], stage: GenerationStage, options?: GenerationOptions) {
@@ -77,14 +79,13 @@ async function requestStructuredJson({
   maxTokens: number;
   aiConfig?: AiRequestConfig;
 }) {
-  const client = createOpenAIClient(aiConfig);
   const { model } = getAiConfig(aiConfig);
 
   if (!model) {
     throw new Error("Missing OPENAI_MODEL or ARK_MODEL");
   }
 
-  const completion = await client.chat.completions.create({
+  const completion = await createChatCompletion(aiConfig, {
     model,
     messages: [
       { role: "system", content: system },
@@ -98,7 +99,7 @@ async function requestStructuredJson({
     },
   });
 
-  return completion.choices[0]?.message?.content ?? "";
+  return completion.choices?.[0]?.message?.content ?? "";
 }
 
 async function requestVisualCode(prompt: string, musicBlueprint: Vibe, repair?: { rawOutput: string; error: string }) {
@@ -146,6 +147,7 @@ function composeDraftBlueprint(moodPlan: unknown, compositionPlan: unknown, soun
       layers: sound.layers,
       mini: composition.mini,
       strudel: composition.strudel,
+      arrangement: composition.arrangement,
     },
     visualCode: "",
   };
@@ -216,6 +218,8 @@ type ComposerCandidate = {
   failCount: number;
   warnCount: number;
   issues: MusicQualityIssue[];
+  diversityScore: number;
+  nearestReference?: string;
 };
 
 function summarizeComposerIssues(issues: MusicQualityIssue[]) {
@@ -241,15 +245,29 @@ function scoreComposerCandidate({
   const draft = composeDraftBlueprint(moodPlan, output, provisionalSoundDesignPlan(moodPlan));
   const vibe = normalizeMusicBlueprint(draft);
   const report = evaluateMusicQuality(prompt, vibe);
+  const diversity = scoreVibeDiversity(vibe, VIBES);
+  const diversityIssues: MusicQualityIssue[] =
+    diversity.score < 46
+      ? [
+          {
+            code: "low-diversity",
+            severity: "warn",
+            message: `候选和 ${diversity.nearestId ?? "默认唱片"} 过近，需改节奏、和弦、motif 或音色。`,
+          },
+        ]
+      : [];
+  const score = Math.round(report.score * 0.82 + diversity.score * 0.18);
 
   return {
     index,
     direction,
     output,
-    score: report.score,
+    score,
     failCount: report.issues.filter((issue) => issue.severity === "fail").length,
-    warnCount: report.issues.filter((issue) => issue.severity === "warn").length,
-    issues: report.issues,
+    warnCount: report.issues.filter((issue) => issue.severity === "warn").length + diversityIssues.length,
+    issues: [...report.issues, ...diversityIssues],
+    diversityScore: diversity.score,
+    nearestReference: diversity.nearestId,
   };
 }
 
@@ -281,23 +299,31 @@ async function runMusicReActComposer({
       prompt: string;
       moodPlan: unknown;
       direction: string;
+      knowledgeContext: string;
       currentVibe?: Vibe;
       target?: RegenerateTarget;
     }) => {
       const directedPrompt = `${input.prompt}\n\n${input.direction}`;
       return input.currentVibe && input.target
-        ? buildRegenerateComposerUserPrompt(directedPrompt, input.moodPlan, input.currentVibe, input.target)
-        : buildComposerUserPrompt(directedPrompt, input.moodPlan);
+        ? buildRegenerateComposerUserPrompt(
+            directedPrompt,
+            input.moodPlan,
+            input.currentVibe,
+            input.target,
+            input.knowledgeContext,
+          )
+        : buildComposerUserPrompt(directedPrompt, input.moodPlan, input.knowledgeContext);
     },
     parse: (rawJson: unknown) => rawJson,
   };
 
   const directions = COMPOSER_CANDIDATE_DIRECTIONS.slice(0, COMPOSER_CANDIDATE_COUNT);
+  const knowledgeContext = buildComposerKnowledgeContext({ prompt, moodPlan, currentVibe, target });
   pushStage(
     stages,
     {
       id: "react-plan",
-      label: target ? `ReAct 编曲 · 规划 ${target}` : "ReAct 编曲 · 规划候选",
+      label: target ? `ReAct 编曲 · 知识库规划 ${target}` : "ReAct 编曲 · 知识库规划候选",
       status: "completed",
     },
     options,
@@ -307,7 +333,7 @@ async function runMusicReActComposer({
     directions.map((direction, index) =>
       runAgentStep(
         { ...composerStep, temperature: 0.72 + index * 0.08 },
-        { prompt, moodPlan, direction, currentVibe, target },
+        { prompt, moodPlan, direction, knowledgeContext, currentVibe, target },
         request,
       ),
     ),
@@ -340,7 +366,7 @@ async function runMusicReActComposer({
     stages,
     {
       id: "react-observe",
-      label: `ReAct 编曲 · 观察候选 · 最佳 ${selected.score}`,
+      label: `ReAct 编曲 · 观察候选 · 最佳 ${selected.score} / 差异 ${selected.diversityScore}`,
       status: candidates.length < COMPOSER_CANDIDATE_COUNT ? "repaired" : "completed",
     },
     options,
@@ -349,14 +375,14 @@ async function runMusicReActComposer({
   if (selected.failCount > 0 || selected.score < 78) {
     const repairDirection = [
       "ReAct 修复：保留候选里最匹配场景的方向，但必须修复观察到的音乐质量问题。",
-      "优先补足可记忆旋律、低音运动、groove 层次、场景明暗匹配和安全原生 Strudel。",
+      "优先补足可记忆旋律、低音运动、groove 层次、场景明暗匹配、安全原生 Strudel、编曲计划和候选差异度。",
       `Observation：${summarizeComposerIssues(selected.issues) || "score below threshold"}`,
     ].join("\n");
 
     try {
       const repairStep = await runAgentStep(
         { ...composerStep, temperature: 0.66 },
-        { prompt, moodPlan, direction: repairDirection, currentVibe, target },
+        { prompt, moodPlan, direction: repairDirection, knowledgeContext, currentVibe, target },
         request,
       );
       const repaired = scoreComposerCandidate({
@@ -399,9 +425,17 @@ async function runMusicReActComposer({
   return selected.output;
 }
 
-function mergeRegeneratedTarget(baseVibe: Vibe, candidate: Vibe, target: RegenerateTarget): Vibe {
+export function mergeRegeneratedTarget(baseVibe: Vibe, candidate: Vibe, target: RegenerateTarget): Vibe {
   if (target === "music" || target === "full") {
-    return { ...candidate, visualCode: baseVibe.visualCode, source: "ai" };
+    return {
+      ...baseVibe,
+      params: candidate.params,
+      pattern: candidate.pattern ?? baseVibe.pattern,
+      visualCode: baseVibe.visualCode,
+      artwork: baseVibe.artwork,
+      musicQuality: candidate.musicQuality,
+      source: "ai",
+    };
   }
 
   if (target === "visual") {
@@ -419,6 +453,7 @@ function mergeRegeneratedTarget(baseVibe: Vibe, candidate: Vibe, target: Regener
     ...basePattern,
     seed: candidatePattern.seed,
     strudel: candidatePattern.strudel,
+    arrangement: candidatePattern.arrangement ?? basePattern.arrangement,
     mini: {
       ...basePattern.mini,
       drums: { ...basePattern.mini?.drums },
@@ -617,10 +652,6 @@ export async function regenerateVibeFromPrompt(
 ): Promise<{ vibe: Vibe; repaired: boolean; fallback: boolean; stages: GenerationStage[] }> {
   const baseVibe = normalizeGeneratedVibe(baseVibeInput);
   const agentPrompt = buildAgentPrompt(prompt, options);
-
-  if (target === "full") {
-    return generateVibeFromPrompt(prompt, options);
-  }
 
   const stages: GenerationStage[] = [];
 

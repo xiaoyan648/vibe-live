@@ -1,5 +1,6 @@
 import { normalizeFft, type FftFrame } from "./analyser";
 import { buildStrudelCode } from "./strudelCode";
+import { installSuperdoughMastering } from "./mastering";
 import type { Vibe, VibeParams } from "@/data/vibes";
 
 type StrudelRepl = {
@@ -108,11 +109,24 @@ class VibeAudioEngine {
     const runtime = await this.ensureRuntime();
     const code = this.currentCode;
     if (!code || code === this.appliedCode) return;
+    const fallbackCode =
+      this.currentVibe && this.currentParams
+        ? buildStrudelCode(this.currentVibe, this.currentParams, { preferNative: false })
+        : "";
 
     this.applying = runtime.repl
       .evaluate(code, false, true)
+      .catch(async (error: unknown) => {
+        if (fallbackCode && fallbackCode !== code) {
+          console.warn("[vibelive:strudel] native pattern failed, falling back to structured pattern", error);
+          await runtime.repl.evaluate(fallbackCode, false, true);
+          this.currentCode = fallbackCode;
+          return;
+        }
+        throw error;
+      })
       .then(() => {
-        this.appliedCode = code;
+        this.appliedCode = this.currentCode === fallbackCode ? fallbackCode : code;
       })
       .finally(() => {
         this.applying = undefined;
@@ -166,6 +180,7 @@ class VibeAudioEngine {
     await samplePromise;
 
     const audioContext = getAudioContext();
+    installSuperdoughMastering(audioContext, webaudio);
     const repl = webaudioRepl({
       getTime: () => audioContext.currentTime,
     }) as StrudelRepl;

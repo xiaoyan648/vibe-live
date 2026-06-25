@@ -52,3 +52,9 @@ export function saveVibeToLibrary(vibe: Vibe) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
   return next;
 }
+
+export function removeSavedVibeFromLibrary(id: string) {
+  const next = loadSavedVibes().filter((item) => item.id !== id);
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  return next;
+}

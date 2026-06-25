@@ -29,11 +29,16 @@ function parseConversationLimit(value: unknown) {
   return undefined;
 }
 
+function readEnv(name: string) {
+  if (typeof process === "undefined") return undefined;
+  return process.env[name];
+}
+
 export function getMaxConversationMessages(requested?: unknown) {
   return (
     parseConversationLimit(requested) ??
-    parseConversationLimit(process.env.VIBELIVE_MAX_CONVERSATION_MESSAGES) ??
-    parseConversationLimit(process.env.NEXT_PUBLIC_VIBELIVE_MAX_CONVERSATION_MESSAGES) ??
+    parseConversationLimit(readEnv("VIBELIVE_MAX_CONVERSATION_MESSAGES")) ??
+    parseConversationLimit(readEnv("NEXT_PUBLIC_VIBELIVE_MAX_CONVERSATION_MESSAGES")) ??
     DEFAULT_MAX_CONVERSATION_MESSAGES
   );
 }

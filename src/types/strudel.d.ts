@@ -13,4 +13,6 @@ declare module "@strudel/webaudio" {
   export function registerSynthSounds(): void;
   export function samples(sampleMap: string | Record<string, unknown>, baseUrl?: string, options?: Record<string, unknown>): Promise<void>;
   export function getAnalyzerData(type?: "time" | "frequency", id?: number): Float32Array;
+  export function getSuperdoughAudioController(): { output?: { disconnect?: () => void } };
+  export function setGainCurve(curve: (value: number) => number): void;
 }

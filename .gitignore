@@ -6,9 +6,13 @@
 # next.js
 /.next/
 /out/
+/release/
 
 # production
-/build
+/build/*
+!/build/icon-source.png
+!/build/icon.png
+!/build/icon.icns
 
 # misc
 .DS_Store

@@ -3,13 +3,14 @@
 import { type CSSProperties, type MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { gsap } from "gsap";
 import { getVibeAudioEngine } from "@/audio/engine";
-import { decodeVibeFromHash, loadSavedVibes, saveVibeToLibrary } from "@/data/persistence";
+import { decodeVibeFromHash, loadSavedVibes, removeSavedVibeFromLibrary, saveVibeToLibrary } from "@/data/persistence";
 import { VIBES, type Vibe, type VibeParams } from "@/data/vibes";
 import VibeBackground from "@/components/VibeBackground";
 import PlayerView from "@/components/PlayerView";
 import VibePrompt from "@/components/VibePrompt";
 import {
   DEFAULT_USER_AI_CONFIG,
+  hasUsableImageToolConfig,
   hasUsableUserAiConfig,
   loadUserAiConfig,
   saveUserAiConfig,
@@ -33,6 +34,78 @@ function averageBand(values: number[], start: number, end: number) {
     sum += values[index] ?? 0;
   }
   return sum / (cappedEnd - start) / 255;
+}
+
+function cssImageUrl(url?: string) {
+  if (!url) return undefined;
+  return `url("${url.replace(/["\\\n\r]/g, "")}")`;
+}
+
+type Rgb = { r: number; g: number; b: number };
+
+function parseHexColor(hex: string): Rgb | null {
+  const value = hex.trim().replace("#", "");
+  if (!/^[0-9a-f]{3}$|^[0-9a-f]{6}$/i.test(value)) return null;
+  const normalized =
+    value.length === 3
+      ? value
+          .split("")
+          .map((char) => char + char)
+          .join("")
+      : value;
+  const int = Number.parseInt(normalized, 16);
+  return {
+    r: (int >> 16) & 255,
+    g: (int >> 8) & 255,
+    b: int & 255,
+  };
+}
+
+function rgba(color: Rgb, alpha: number) {
+  return `rgba(${color.r}, ${color.g}, ${color.b}, ${alpha})`;
+}
+
+function relativeLuminance(hex: string) {
+  const rgb = parseHexColor(hex);
+  if (!rgb) return 0;
+  const channel = (value: number) => {
+    const normalized = value / 255;
+    return normalized <= 0.03928 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * channel(rgb.r) + 0.7152 * channel(rgb.g) + 0.0722 * channel(rgb.b);
+}
+
+function readableThemeVars(base: string) {
+  const isLight = relativeLuminance(base) > 0.48;
+  const ink = isLight ? { r: 31, g: 36, b: 28 } : { r: 232, g: 238, b: 226 };
+  const inverse = isLight ? { r: 245, g: 247, b: 238 } : { r: 5, g: 12, b: 8 };
+  const shadow = isLight ? { r: 32, g: 34, b: 28 } : { r: 0, g: 0, b: 0 };
+
+  return {
+    ["--gallery-ink" as string]: rgba(ink, isLight ? 0.86 : 0.88),
+    ["--gallery-muted" as string]: rgba(ink, isLight ? 0.66 : 0.58),
+    ["--gallery-faint" as string]: rgba(ink, isLight ? 0.42 : 0.34),
+    ["--gallery-line" as string]: rgba(ink, isLight ? 0.18 : 0.14),
+    ["--gallery-line-strong" as string]: rgba(ink, isLight ? 0.34 : 0.32),
+    ["--gallery-surface" as string]: rgba(shadow, isLight ? 0.1 : 0.12),
+    ["--gallery-surface-hover" as string]: rgba(ink, isLight ? 0.09 : 0.07),
+    ["--gallery-primary-bg" as string]: rgba(ink, isLight ? 0.78 : 0.82),
+    ["--gallery-primary-bg-hover" as string]: rgba(ink, isLight ? 0.86 : 0.9),
+    ["--gallery-primary-text" as string]: rgba(inverse, isLight ? 0.92 : 0.94),
+    ["--gallery-depth" as string]: isLight ? "#f2ecdc" : "#02220f",
+    ["--gallery-base-weight" as string]: isLight ? "74%" : "86%",
+    ["--gallery-vignette-edge" as string]: rgba(shadow, isLight ? 0.2 : 0.32),
+    ["--gallery-vignette-bottom" as string]: rgba(shadow, isLight ? 0.16 : 0.22),
+    ["--player-ink" as string]: rgba(ink, isLight ? 0.88 : 0.88),
+    ["--player-muted" as string]: rgba(ink, isLight ? 0.7 : 0.74),
+    ["--player-faint" as string]: rgba(ink, isLight ? 0.46 : 0.36),
+    ["--player-line" as string]: rgba(ink, isLight ? 0.18 : 0.12),
+    ["--player-line-strong" as string]: rgba(ink, isLight ? 0.32 : 0.28),
+    ["--player-control-bg" as string]: rgba(shadow, isLight ? 0.11 : 0.3),
+    ["--player-play-bg" as string]: rgba(ink, isLight ? 0.84 : 0.86),
+    ["--player-play-text" as string]: rgba(inverse, isLight ? 0.94 : 0.94),
+    ["--player-glow" as string]: rgba(ink, isLight ? 0.12 : 0.16),
+  };
 }
 
 export default function Page() {
@@ -102,7 +175,16 @@ export default function Page() {
     setPlaying((current) => !current);
   }
 
+  const removeSavedVibe = useCallback((vibe: Vibe) => {
+    const updated = removeSavedVibeFromLibrary(vibe.id);
+    setSavedVibes(updated);
+    setPreview((current) => (current.id === vibe.id ? HOME_VIBE : current));
+    setChatBaseVibe((current) => (current?.id === vibe.id ? null : current));
+    setNotice(`已移除「${vibe.name}」。`);
+  }, []);
+
   const displayVibe = active ?? preview;
+  const contrastVars = useMemo(() => readableThemeVars(displayVibe.palette.base), [displayVibe.palette.base]);
 
   useEffect(() => {
     playbackRef.current = {
@@ -183,8 +265,11 @@ export default function Page() {
   return (
     <main
       ref={stageRef}
-      className={`stage ${active ? "stage--detail" : "stage--home"}`}
+      className={`stage ${active ? "stage--detail" : "stage--home"} ${
+        displayVibe.artwork?.imageUrl ? "stage--has-artwork" : ""
+      }`}
       style={{
+        ...contrastVars,
         ["--accent" as string]: displayVibe.palette.accent,
         ["--accent-2" as string]: displayVibe.palette.accent2,
         ["--base" as string]: displayVibe.palette.base,
@@ -228,6 +313,7 @@ export default function Page() {
               setPreview(vibe);
               setNotice(phase === "artwork" ? "视觉页面已更新，已加入本地唱片架。" : "已刻录完成，并加入本地唱片架。");
             }}
+            onRemove={removeSavedVibe}
           />
         )}
       </div>
@@ -243,6 +329,7 @@ function Home({
   onPreview,
   onSelect,
   onGenerated,
+  onRemove,
 }: {
   shelfVibes: Vibe[];
   notice: string | null;
@@ -250,9 +337,11 @@ function Home({
   onPreview: (v: Vibe) => void;
   onSelect: (v: Vibe) => void;
   onGenerated: (v: Vibe, prompt: string, phase?: "music" | "artwork") => void;
+  onRemove: (v: Vibe) => void;
 }) {
   const [selectedId, setSelectedId] = useState(() => chatBaseVibe?.id ?? shelfVibes[0]?.id ?? HOME_VIBE.id);
   const [atelierOpen, setAtelierOpen] = useState(false);
+  const [atelierGenerating, setAtelierGenerating] = useState(false);
   const [composeMode, setComposeMode] = useState<"new" | "edit">("edit");
   const [hoverDirection, setHoverDirection] = useState(0);
   const [configOpen, setConfigOpen] = useState(false);
@@ -262,6 +351,9 @@ function Home({
     shelfVibes.findIndex((vibe) => vibe.id === selectedId),
   );
   const selectedVibe = shelfVibes[selectedIndex] ?? shelfVibes[0] ?? HOME_VIBE;
+  const builtinIds = useMemo(() => new Set(VIBES.map((vibe) => vibe.id)), []);
+
+  const canRemoveVibe = useCallback((vibe: Vibe) => !builtinIds.has(vibe.id), [builtinIds]);
 
   useEffect(() => {
     onPreview(selectedVibe);
@@ -328,7 +420,13 @@ function Home({
           VibeLive
         </div>
         <div className="home__tools">
-          <span className="home__tag">{hasUsableUserAiConfig(aiConfig) ? "local key ready" : "private archive"}</span>
+          <span className="home__tag">
+            {hasUsableImageToolConfig(aiConfig)
+              ? "image tool ready"
+              : hasUsableUserAiConfig(aiConfig)
+                ? "local key ready"
+                : "private archive"}
+          </span>
           <button type="button" className="home__config-button" onClick={() => setConfigOpen((open) => !open)}>
             AI 配置
           </button>
@@ -389,30 +487,64 @@ function Home({
                 ["--record-base" as string]: vibe.palette.base,
               } as CSSProperties;
               const isActive = offset === 0;
+              const canRemove = canRemoveVibe(vibe);
 
               return (
-                <button
+                <div
                   key={vibe.id}
-                  type="button"
-                  className={`record-slide ${isActive ? "is-active" : ""}`}
+                  className={`record-slide-frame ${isActive ? "is-active" : ""} ${canRemove ? "is-removable" : ""}`}
                   style={recordStyle}
-                  aria-current={isActive ? "true" : undefined}
-                  aria-label={`进入 ${vibe.name}`}
-                  onMouseEnter={() => onPreview(vibe)}
-                  onFocus={() => onPreview(vibe)}
-                  onClick={() => {
-                    setSelectedId(vibe.id);
-                    setComposeMode("edit");
-                    onSelect(vibe);
-                  }}
                 >
-                  <span className="record-slide__disc" aria-hidden="true" />
-                  <span className="record-slide__label">
-                    <strong>{vibe.name}</strong>
-                    <small>{vibe.subtitle}</small>
-                    <em>点击进入</em>
-                  </span>
-                </button>
+                  <button
+                    type="button"
+                    className={`record-slide ${isActive ? "is-active" : ""}`}
+                    aria-current={isActive ? "true" : undefined}
+                    aria-label={`进入 ${vibe.name}`}
+                    onMouseEnter={() => onPreview(vibe)}
+                    onFocus={() => onPreview(vibe)}
+                    onClick={() => {
+                      setSelectedId(vibe.id);
+                      setComposeMode("edit");
+                      onSelect(vibe);
+                    }}
+                  >
+                    <span className="record-slide__disc" aria-hidden="true" />
+                    {vibe.artwork?.imageUrl && (
+                      <span
+                        className="record-slide__artwork"
+                        style={{ backgroundImage: cssImageUrl(vibe.artwork.imageUrl) }}
+                        aria-hidden="true"
+                      />
+                    )}
+                    <span className="record-slide__label">
+                      <strong>{vibe.name}</strong>
+                      <small>{vibe.subtitle}</small>
+                      <em>点击进入</em>
+                    </span>
+                  </button>
+                  {canRemove && (
+                    <button
+                      type="button"
+                      className="record-slide__remove"
+                      style={
+                        isActive
+                          ? ({
+                              opacity: 1,
+                              pointerEvents: "auto",
+                              transform: "translateX(-50%) translateY(0)",
+                            } as CSSProperties)
+                          : undefined
+                      }
+                      aria-label={`移除 ${vibe.name}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onRemove(vibe);
+                      }}
+                    >
+                      移除
+                    </button>
+                  )}
+                </div>
               );
             })}
           </div>
@@ -427,68 +559,72 @@ function Home({
             进入播放器
           </button>
           <button type="button" className="home-gallery__secondary" onClick={() => setAtelierOpen((open) => !open)}>
-            {atelierOpen ? "收起手札" : "制作唱片"}
+            {atelierOpen ? "收起手札" : atelierGenerating ? "刻录中" : "制作唱片"}
           </button>
         </div>
       </section>
 
       {atelierOpen && (
+        <button
+          type="button"
+          className="home-atelier__scrim"
+          aria-label="关闭制作窗口"
+          onClick={() => setAtelierOpen(false)}
+        />
+      )}
+      <section className={`home-atelier ${atelierOpen ? "is-open" : "is-closed"}`} aria-label="制作唱片" aria-hidden={!atelierOpen}>
+        <div className="home-atelier__bar">
+          <div className="home-atelier__bar-main">
+            <span>制作唱片</span>
+            <div className="home-atelier__mode" role="group" aria-label="制作模式">
+              <button
+                type="button"
+                className={composeMode === "new" ? "is-active" : ""}
+                aria-pressed={composeMode === "new"}
+                onClick={() => setComposeMode("new")}
+              >
+                新建
+              </button>
+              <button
+                type="button"
+                className={composeMode === "edit" ? "is-active" : ""}
+                aria-pressed={composeMode === "edit"}
+                onClick={() => setComposeMode("edit")}
+              >
+                修改当前
+              </button>
+            </div>
+          </div>
+          <button type="button" onClick={() => setAtelierOpen(false)}>
+            收起
+          </button>
+        </div>
+        <VibePrompt
+          baseVibe={composeMode === "edit" ? selectedVibe : null}
+          accent={selectedVibe.palette.accent}
+          accent2={selectedVibe.palette.accent2}
+          onGenerated={(vibe, prompt, phase) => {
+            setSelectedId(vibe.id);
+            setComposeMode("edit");
+            onGenerated(vibe, prompt, phase);
+          }}
+          onOpenVibe={onSelect}
+          aiConfig={aiConfig}
+          onGeneratingChange={setAtelierGenerating}
+          onNewSession={() => setComposeMode("new")}
+        />
+      </section>
+
+      {configOpen && (
         <>
           <button
             type="button"
-            className="home-atelier__scrim"
-            aria-label="关闭制作窗口"
-            onClick={() => setAtelierOpen(false)}
+            className="ai-config-panel__scrim"
+            aria-label="关闭 AI 配置"
+            onClick={() => setConfigOpen(false)}
           />
-          <section className="home-atelier" aria-label="制作唱片">
-            <div className="home-atelier__bar">
-              <div className="home-atelier__bar-main">
-                <span>制作唱片</span>
-                <div className="home-atelier__mode" role="group" aria-label="制作模式">
-                  <button
-                    type="button"
-                    className={composeMode === "new" ? "is-active" : ""}
-                    aria-pressed={composeMode === "new"}
-                    onClick={() => setComposeMode("new")}
-                  >
-                    新建
-                  </button>
-                  <button
-                    type="button"
-                    className={composeMode === "edit" ? "is-active" : ""}
-                    aria-pressed={composeMode === "edit"}
-                    onClick={() => setComposeMode("edit")}
-                  >
-                    修改当前
-                  </button>
-                </div>
-              </div>
-              <button type="button" onClick={() => setAtelierOpen(false)}>
-                收起
-              </button>
-            </div>
-            <VibePrompt
-              baseVibe={composeMode === "edit" ? selectedVibe : null}
-              accent={selectedVibe.palette.accent}
-              accent2={selectedVibe.palette.accent2}
-              onGenerated={(vibe, prompt, phase) => {
-                setSelectedId(vibe.id);
-                setComposeMode("edit");
-                onGenerated(vibe, prompt, phase);
-              }}
-              onOpenVibe={onSelect}
-              aiConfig={aiConfig}
-            />
-          </section>
+          <AiConfigPanel config={aiConfig} onClose={() => setConfigOpen(false)} onSave={handleSaveAiConfig} />
         </>
-      )}
-
-      {configOpen && (
-        <AiConfigPanel
-          config={aiConfig}
-          onClose={() => setConfigOpen(false)}
-          onSave={handleSaveAiConfig}
-        />
       )}
 
       <div className="home__foot" aria-hidden="true" />
@@ -506,12 +642,24 @@ function AiConfigPanel({
   onSave: (config: UserAiConfig) => void;
 }) {
   const [draft, setDraft] = useState<UserAiConfig>(config);
+  const agentReady = hasUsableUserAiConfig(draft);
+  const imageToolReady = hasUsableImageToolConfig(draft);
+
+  function updateImageTool(patch: Partial<UserAiConfig["imageTool"]>) {
+    setDraft((current) => ({
+      ...current,
+      imageTool: {
+        ...current.imageTool,
+        ...patch,
+      },
+    }));
+  }
 
   return (
     <section className="ai-config-panel" aria-label="AI 配置">
       <div className="ai-config-panel__bar">
         <div>
-          <span className="mono">LOCAL MODEL</span>
+          <span className="mono">LOCAL CLIENT</span>
           <h2>AI 配置</h2>
         </div>
         <button type="button" onClick={onClose}>
@@ -519,37 +667,93 @@ function AiConfigPanel({
         </button>
       </div>
 
-      <label className="ai-config-field">
-        <span>API Key</span>
-        <input
-          type="password"
-          value={draft.apiKey}
-          autoComplete="off"
-          spellCheck={false}
-          onChange={(event) => setDraft((current) => ({ ...current, apiKey: event.target.value }))}
-          placeholder="sk-..."
-        />
-      </label>
+      <div className="ai-config-section">
+        <div className="ai-config-section__head">
+          <span>编曲 agent</span>
+          <strong>{agentReady ? "ready" : "local"}</strong>
+        </div>
 
-      <label className="ai-config-field">
-        <span>Base URL</span>
-        <input
-          value={draft.baseURL}
-          spellCheck={false}
-          onChange={(event) => setDraft((current) => ({ ...current, baseURL: event.target.value }))}
-          placeholder="https://api.openai.com/v1"
-        />
-      </label>
+        <label className="ai-config-field">
+          <span>OPENAI_API_KEY</span>
+          <input
+            type="password"
+            value={draft.apiKey}
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(event) => setDraft((current) => ({ ...current, apiKey: event.target.value }))}
+            placeholder="sk-..."
+          />
+        </label>
 
-      <label className="ai-config-field">
-        <span>Model</span>
-        <input
-          value={draft.model}
-          spellCheck={false}
-          onChange={(event) => setDraft((current) => ({ ...current, model: event.target.value }))}
-          placeholder="gpt-4.1-mini"
-        />
-      </label>
+        <label className="ai-config-field">
+          <span>OPENAI_BASE_URL</span>
+          <input
+            value={draft.baseURL}
+            spellCheck={false}
+            onChange={(event) => setDraft((current) => ({ ...current, baseURL: event.target.value }))}
+            placeholder="https://api.openai.com/v1"
+          />
+        </label>
+
+        <label className="ai-config-field">
+          <span>OPENAI_MODEL</span>
+          <input
+            value={draft.model}
+            spellCheck={false}
+            onChange={(event) => setDraft((current) => ({ ...current, model: event.target.value }))}
+            placeholder="gpt-4.1-mini"
+          />
+        </label>
+      </div>
+
+      <div className="ai-config-section">
+        <div className="ai-config-section__head">
+          <span>背景图 tool</span>
+          <strong>{imageToolReady ? "ready" : draft.imageTool.enabled ? "on" : "off"}</strong>
+        </div>
+
+        <button
+          type="button"
+          className={`ai-config-toggle ${draft.imageTool.enabled ? "is-active" : ""}`}
+          aria-pressed={draft.imageTool.enabled}
+          onClick={() => updateImageTool({ enabled: !draft.imageTool.enabled })}
+        >
+          <span aria-hidden="true" />
+          {draft.imageTool.enabled ? "已开启图片生成" : "开启图片生成"}
+        </button>
+
+        <label className="ai-config-field">
+          <span>TOOL_OPENAI_API_KEY</span>
+          <input
+            type="password"
+            value={draft.imageTool.apiKey}
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(event) => updateImageTool({ apiKey: event.target.value })}
+            placeholder="sk-..."
+          />
+        </label>
+
+        <label className="ai-config-field">
+          <span>TOOL_OPENAI_BASE_URL</span>
+          <input
+            value={draft.imageTool.baseURL}
+            spellCheck={false}
+            onChange={(event) => updateImageTool({ baseURL: event.target.value })}
+            placeholder="https://api.openai.com/v1"
+          />
+        </label>
+
+        <label className="ai-config-field">
+          <span>TOOL_OPENAI_MODEL</span>
+          <input
+            value={draft.imageTool.model}
+            spellCheck={false}
+            onChange={(event) => updateImageTool({ model: event.target.value })}
+            placeholder="gpt-image-1"
+          />
+        </label>
+      </div>
 
       <div className="ai-config-panel__actions">
         <button type="button" onClick={() => onSave(DEFAULT_USER_AI_CONFIG)}>
